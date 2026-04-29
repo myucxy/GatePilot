@@ -20,9 +20,12 @@ mobile/       Flutter
 deploy/       Docker Compose、网关、OIDC配置
 schema/       OpenAPI、WebSocket JSON Schema、枚举定义
 docs/         设计文档
+scripts/      开发、测试、初始化脚本
 ```
 
 `schema/` 是多端协作的中心。任何 API 或 WebSocket 字段变更都先改 schema，再改实现。
+
+M0 之前不建议四端同时进入业务实现。允许并行做工程空壳、构建脚本和 UI 静态布局，但所有跨端业务代码必须等 `schema/` 初版冻结后再接入。
 
 ## 3. 里程碑
 
@@ -42,13 +45,22 @@ docs/         设计文档
 - `web-admin` 登录页空壳。
 - `mobile` 登录页空壳。
 - `schema/openapi.yaml` 初版。
-- `schema/ws-messages/*.schema.json` 初版。
+- `schema/enums.yaml` 初版。
+- `schema/errors.yaml` 初版。
+- `schema/ws/*.schema.json` 初版。
+- `deploy/docker-compose.yml` 可启动 PostgreSQL、Redis、OIDC 和 Server。
+- `scripts/dev-seed` 或等价脚本创建默认租户和测试用户。
 
 验收：
 
 - `docker compose up` 后 Server ready。
 - Web 能完成 OIDC 登录并调用 `/api/v1/me`。
 - Agent 能读取配置并打印协议版本。
+- schema lint 通过。
+- Web 生成 TypeScript client 后无类型错误。
+- Mobile 生成 Dart client 或手写模型校验通过。
+- Agent 与 Server 的协议枚举对照测试通过。
+- 四端确认 M1 所需字段没有未决项。
 
 ### M1: 设备绑定和 Agent 长连接
 
@@ -183,6 +195,22 @@ docs/         设计文档
 - Redis 重启后审批事实状态不丢。
 
 ## 4. 并行开发分工
+
+并行开发启动条件：
+
+- M0 验收完成。
+- M1-M3 的接口、枚举、错误码和 WebSocket 消息已经冻结。
+- 数据库迁移初版可从空库执行。
+- fake CLI 和基础 E2E 脚本存在，至少覆盖设备绑定、会话创建和一次审批闭环。
+- 每个端都有独立启动命令和健康检查或冒烟检查。
+
+并行开发协作规则：
+
+- Server 先合并 schema 变更，其他端再更新生成代码。
+- Web、Mobile 不直接依赖后端未冻结字段。
+- Agent 不新增 schema 之外的消息类型或枚举值。
+- 任何破坏性契约变更必须在 PR 或变更说明中列出影响端和迁移方式。
+- 每个里程碑只允许短期 mock，主流程验收时必须连真实 Server。
 
 ### Server
 

@@ -29,7 +29,7 @@ HTTP API 前缀：
 ```json
 {
   "error": {
-    "code": "approval_conflict",
+    "code": "approval_already_decided",
     "message": "approval already decided",
     "details": {}
   },
@@ -343,6 +343,7 @@ GET /api/v1/sessions/{session_id}/output?before_seq=1000&limit=100
   "message_id": "uuid",
   "trace_id": "tr_...",
   "sent_at": "2026-04-29T12:00:00Z",
+  "schema_version": "2026-04-01",
   "payload": {}
 }
 ```
@@ -350,8 +351,11 @@ GET /api/v1/sessions/{session_id}/output?before_seq=1000&limit=100
 要求：
 
 - `message_id` 由发送方生成，用于消息级去重和日志追踪。
+- `trace_id` 必须贯穿 Agent 检测、服务端创建、客户端决策和 Agent ACK。
+- `schema_version` 必须和 `schema/ws/*.schema.json` 中冻结版本一致。
 - 服务端对关键消息返回 ACK。
 - 业务最终状态以数据库为准，WebSocket ACK 不代表业务事务一定完成。
+- 本文后续 WebSocket 示例如果没有重复展开 `trace_id`、`sent_at`、`schema_version`，实现时仍必须包含这些 envelope 字段。
 
 ## 4. Agent WebSocket
 
@@ -589,3 +593,39 @@ YYYY-MM-DD
 - 用户审批动作使用 HTTP `Idempotency-Key` 去重。
 - Agent ACK 使用 `delivery_id + ack_result` 去重。
 - 重试不能生成新的审批单或重复执行决策。
+
+## 8. Schema 落地要求
+
+Markdown 只描述业务意图，真实实现契约必须落在 `schema/`：
+
+- HTTP API 必须进入 `schema/openapi.yaml`。
+- 通用枚举必须进入 `schema/enums.yaml`。
+- 错误码必须进入 `schema/errors.yaml`。
+- WebSocket envelope 和 payload 必须进入 `schema/ws/*.schema.json`。
+
+OpenAPI 每个接口必须定义：
+
+- 请求头、路径参数、查询参数和请求体。
+- `200`、`201`、`202` 等成功响应结构。
+- `400`、`401`、`403`、`404`、`409`、`422` 等业务错误响应。
+- 必填字段、可空字段、枚举引用和分页结构。
+
+WebSocket JSON Schema 每类消息必须定义：
+
+- 统一 envelope 字段。
+- payload 必填字段。
+- payload 可选字段和默认处理方式。
+- 客户端遇到未知字段或未知枚举时的降级行为。
+
+M0 阶段至少冻结以下契约：
+
+- `/api/v1/me`
+- `POST /api/v1/client-instances`
+- `POST /api/v1/tenants/{tenant_id}/device-activation-codes`
+- `POST /api/v1/agent/register`
+- `agent.hello`
+- `agent.connected`
+- `agent.heartbeat`
+- WebSocket envelope
+- 通用错误响应
+- 通用分页响应

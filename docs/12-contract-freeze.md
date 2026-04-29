@@ -6,24 +6,46 @@
 
 ## 2. 契约来源
 
-建议目录：
+必须目录：
 
 ```text
 schema/
   openapi.yaml
   enums.yaml
+  errors.yaml
   ws/
     envelope.schema.json
     agent.hello.schema.json
+    agent.connected.schema.json
+    agent.heartbeat.schema.json
+    session.created.schema.json
     approval.detected.schema.json
+    approval.accepted.schema.json
     approval.decision.deliver.schema.json
     approval.decision.ack.schema.json
     approval.created.schema.json
     approval.updated.schema.json
-  errors.yaml
 ```
 
 文档说明业务意图，`schema/` 是实现契约来源。
+
+M0 必须先提交这些文件的最小可用版本。没有 schema 的接口和消息只能作为设计草案，不能作为四端实现依据。
+
+schema 文件要求：
+
+- `openapi.yaml` 必须能被标准 OpenAPI 3.x 工具解析。
+- `enums.yaml` 必须集中列出所有跨端枚举值和说明。
+- `errors.yaml` 必须列出错误码、HTTP 状态码、可重试性和客户端默认文案键。
+- `ws/envelope.schema.json` 必须被所有 WebSocket payload schema 引用。
+- 每个 `ws/*.schema.json` 必须包含 message `type`、payload 必填字段和兼容性说明。
+
+不允许把以下内容只写在 Markdown 中：
+
+- 新接口字段。
+- 新 WebSocket 消息类型。
+- 新枚举值。
+- 新错误码。
+- 状态机新增终态或可恢复状态。
 
 ## 3. 通用格式
 
@@ -171,20 +193,42 @@ GET /api/v1/approvals?limit=50&cursor=...
 - `idempotency_key_required`
 - `client_instance_required`
 
+错误码命名规则：
+
+- 使用小写 snake_case。
+- 同一业务含义只能有一个错误码。
+- 状态冲突类错误优先使用具体业务错误码，例如审批已处理使用 `approval_already_decided`。
+- 不新增泛化的 `*_conflict` 错误码，除非没有更具体的业务含义。
+- 每个错误码必须在 `schema/errors.yaml` 中登记 HTTP 状态码和客户端处理建议。
+
 ## 7. 枚举冻结
 
 所有枚举必须集中定义：
 
+- `tenant_member_role`
+- `common_active_status`
 - `device_status`
 - `session_status`
 - `approval_status`
 - `decision_type`
 - `delivery_status`
 - `client_type`
+- `client_instance_status`
 - `notification_status`
+- `device_grant_permission`
+- `device_token_status`
+- `platform`
+- `arch`
+- `push_provider`
+- `notification_channel`
+- `output_stream_type`
 - `cli_type`
 - `risk_level`
 - `actor_type`
+- `ack_result`
+- `policy_decision`
+- `action_result`
+- `audit_result`
 
 规则：
 
@@ -235,6 +279,24 @@ Client 可选 ACK：
 
 Client ACK 只用于通知追踪，不影响审批状态。
 
+Agent ACK payload 必须包含：
+
+- `delivery_id`
+- `approval_id`
+- `session_id`
+- `ack_result`
+- `detail`
+
+`ack_result` 冻结值：
+
+- `written`: 字节已写入 PTY。
+- `accepted`: CLI 输出变化表明已继续执行。
+- `session_closed`: 会话已经结束，无法回写。
+- `write_failed`: 写入 PTY 失败。
+- `stale_decision`: 决策已过期或重复。
+
+服务端必须把 `written` 和 `accepted` 视为投递成功，把其他值视为投递失败或需人工介入。
+
 ## 10. 幂等契约
 
 ### 10.1 HTTP 幂等
@@ -276,6 +338,20 @@ tenant_id + idempotency_key
 - Web/Mobile 私自复制后端未冻结字段。
 - Server 返回未登记的枚举值。
 - Agent 使用只存在代码里、schema 不存在的消息类型。
+
+生成物要求：
+
+- 生成代码应提交或在 CI 中稳定生成，团队需选择一种方式并保持一致。
+- Web、Mobile、Agent 的生成或对照检查必须进入 CI。
+- schema 修改必须触发受影响端的类型检查。
+- 手写模型必须有 schema 对照测试，不能只依赖人工检查。
+
+UI 端兼容要求：
+
+- 未知枚举显示为通用“未知状态”或等价降级文案。
+- 新增可选字段不应影响旧客户端渲染。
+- 删除、重命名字段或新增必填字段视为破坏性变更。
+- Web/Mobile 不把 `message` 字段作为最终展示文案，只根据 `error.code` 映射。
 
 ## 12. 契约变更流程
 

@@ -73,6 +73,123 @@
 - `failed`
 - `read`
 
+### 2.8 cli_type
+
+- `codex`
+- `claude_code`
+- `opencode`
+- `copilot`
+- `gemini`
+- `custom`
+
+### 2.9 risk_level
+
+- `low`
+- `medium`
+- `high`
+- `critical`
+
+### 2.10 actor_type
+
+- `user`
+- `device`
+- `system`
+- `policy`
+- `local`
+
+### 2.11 ack_result
+
+- `written`
+- `accepted`
+- `session_closed`
+- `write_failed`
+- `stale_decision`
+
+### 2.12 tenant_member_role
+
+- `owner`
+- `admin`
+- `approver`
+- `viewer`
+
+### 2.13 device_grant_permission
+
+- `view`
+- `approve`
+- `admin`
+
+### 2.14 client_instance_status
+
+- `active`
+- `logged_out`
+- `revoked`
+
+### 2.15 common_active_status
+
+- `active`
+- `disabled`
+
+适用范围：
+
+- `tenants.status`
+- `users.status`
+- `tenant_members.status`
+
+### 2.16 device_token_status
+
+- `active`
+- `rotated`
+- `revoked`
+
+### 2.17 platform
+
+- `windows`
+- `macos`
+- `linux`
+- `ios`
+- `android`
+- `browser`
+
+### 2.18 arch
+
+- `amd64`
+- `arm64`
+
+### 2.19 push_provider
+
+- `fcm`
+- `apns`
+- `webpush`
+
+### 2.20 notification_channel
+
+- `websocket`
+- `push`
+
+### 2.21 output_stream_type
+
+- `stdout`
+- `stderr`
+- `terminal`
+
+### 2.22 policy_decision
+
+- `manual`
+- `auto_reject`
+- `auto_approve`
+
+### 2.23 action_result
+
+- `accepted`
+- `duplicate`
+- `conflict`
+
+### 2.24 audit_result
+
+- `success`
+- `failure`
+- `conflict`
+
 ## 3. 核心实体
 
 ### 3.1 tenants
@@ -82,7 +199,7 @@
 | id | uuid | 主键 |
 | name | varchar(128) | 租户名称 |
 | slug | varchar(128) | 租户短名，全局唯一 |
-| status | varchar(32) | active/disabled |
+| status | varchar(32) | common_active_status |
 | created_at | timestamptz | 创建时间 |
 | updated_at | timestamptz | 更新时间 |
 
@@ -99,7 +216,7 @@
 | oidc_subject | varchar(256) | OIDC subject |
 | email | varchar(256) | 邮箱 |
 | display_name | varchar(128) | 显示名 |
-| status | varchar(32) | active/disabled |
+| status | varchar(32) | common_active_status |
 | last_login_at | timestamptz | 最近登录时间 |
 | created_at | timestamptz | 创建时间 |
 | updated_at | timestamptz | 更新时间 |
@@ -116,8 +233,8 @@
 | id | uuid | 主键 |
 | tenant_id | uuid | 租户 |
 | user_id | uuid | 用户 |
-| role | varchar(32) | owner/admin/approver/viewer |
-| status | varchar(32) | active/disabled |
+| role | varchar(32) | tenant_member_role |
+| status | varchar(32) | common_active_status |
 | created_at | timestamptz | 创建时间 |
 | updated_at | timestamptz | 更新时间 |
 
@@ -152,14 +269,14 @@
 | id | uuid | 主键 |
 | tenant_id | uuid | 租户 |
 | user_id | uuid | 登录用户 |
-| client_type | varchar(32) | web/mobile_ios/mobile_android/agent_desktop |
+| client_type | varchar(32) | client_type |
 | device_id | uuid | Agent 本地 UI 所属设备，可为空 |
 | display_name | varchar(128) | 客户端显示名 |
 | app_version | varchar(64) | 客户端版本 |
-| platform | varchar(64) | iOS/Android/Browser/Windows/macOS/Linux |
+| platform | varchar(64) | platform |
 | push_token_ciphertext | text | 加密后的 Push Token，可为空 |
-| push_provider | varchar(32) | fcm/apns/webpush，可为空 |
-| status | varchar(32) | active/logged_out/revoked |
+| push_provider | varchar(32) | push_provider，可为空 |
+| status | varchar(32) | client_instance_status |
 | last_seen_at | timestamptz | 最近活跃时间 |
 | created_at | timestamptz | 创建时间 |
 | updated_at | timestamptz | 更新时间 |
@@ -182,8 +299,8 @@
 | tenant_id | uuid | 租户 |
 | owner_user_id | uuid | 设备所属用户 |
 | name | varchar(128) | 设备名称 |
-| platform | varchar(32) | windows/macos/linux |
-| arch | varchar(32) | amd64/arm64 |
+| platform | varchar(32) | platform |
+| arch | varchar(32) | arch |
 | agent_version | varchar(64) | Agent 版本 |
 | protocol_version | varchar(32) | 协议版本 |
 | capabilities | jsonb | 能力集 |
@@ -208,7 +325,7 @@
 | tenant_id | uuid | 租户 |
 | device_id | uuid | 设备 |
 | user_id | uuid | 被授权用户 |
-| permission | varchar(32) | view/approve/admin |
+| permission | varchar(32) | device_grant_permission |
 | granted_by_user_id | uuid | 授权人 |
 | created_at | timestamptz | 创建时间 |
 | expires_at | timestamptz | 过期时间，可为空 |
@@ -230,7 +347,7 @@
 | id | uuid | 主键 |
 | device_id | uuid | 设备 |
 | token_hash | varchar(128) | 设备令牌哈希 |
-| status | varchar(32) | active/rotated/revoked |
+| status | varchar(32) | device_token_status |
 | created_at | timestamptz | 创建时间 |
 | expires_at | timestamptz | 过期时间 |
 | revoked_at | timestamptz | 吊销时间 |
@@ -248,7 +365,7 @@
 | tenant_id | uuid | 租户 |
 | device_id | uuid | 所属设备 |
 | user_id | uuid | 发起用户，可为空 |
-| cli_type | varchar(64) | codex/claude_code/opencode/copilot/gemini/custom |
+| cli_type | varchar(64) | cli_type |
 | command_line_redacted | text | 脱敏后的启动命令 |
 | working_dir_hash | varchar(128) | 工作目录哈希 |
 | status | varchar(32) | session_status |
@@ -278,7 +395,7 @@
 | event_id | varchar(128) | Agent 本地事件 ID |
 | idempotency_key | varchar(256) | 上报幂等键 |
 | event_type | varchar(64) | 事件类型 |
-| risk_level | varchar(32) | low/medium/high/critical |
+| risk_level | varchar(32) | risk_level |
 | prompt_text_redacted | text | 脱敏后的提示文本 |
 | context_before_redacted | text | 脱敏后的上下文 |
 | suggested_actions | jsonb | 建议动作 |
@@ -287,10 +404,10 @@
 | policy_result | jsonb | 策略命中结果 |
 | expires_at | timestamptz | 过期时间 |
 | decided_at | timestamptz | 决策时间 |
-| decided_by_actor_type | varchar(32) | user/system/policy/local |
+| decided_by_actor_type | varchar(32) | actor_type |
 | decided_by_actor_id | varchar(64) | 决策主体 |
 | decided_from_client_instance_id | uuid | 提交决策的客户端实例 |
-| decided_from_client_type | varchar(32) | web/mobile_ios/mobile_android/agent_desktop |
+| decided_from_client_type | varchar(32) | client_type |
 | decision_type | varchar(32) | decision_type |
 | decision_payload_redacted | text | 脱敏后的回复内容 |
 | created_at | timestamptz | 创建时间 |
@@ -316,14 +433,14 @@
 | id | uuid | 主键 |
 | tenant_id | uuid | 租户 |
 | approval_request_id | uuid | 审批单 |
-| actor_type | varchar(32) | user/system/policy/local |
+| actor_type | varchar(32) | actor_type |
 | actor_id | varchar(64) | 行为主体 |
 | client_instance_id | uuid | 提交动作的客户端实例 |
-| client_type | varchar(32) | web/mobile_ios/mobile_android/agent_desktop |
-| decision_type | varchar(32) | approve/reject/reply等 |
+| client_type | varchar(32) | client_type |
+| decision_type | varchar(32) | decision_type |
 | payload_redacted | text | 脱敏后的动作内容 |
 | idempotency_key | varchar(256) | 用户动作幂等键 |
-| result | varchar(32) | accepted/duplicate/conflict |
+| result | varchar(32) | action_result |
 | created_at | timestamptz | 创建时间 |
 
 约束：
@@ -338,14 +455,14 @@
 | tenant_id | uuid | 租户 |
 | approval_request_id | uuid | 审批单 |
 | device_id | uuid | 目标设备 |
-| decision_type | varchar(32) | 决策类型 |
+| decision_type | varchar(32) | decision_type |
 | payload_redacted | text | 回写内容 |
 | status | varchar(32) | delivery_status |
 | attempt_count | integer | 尝试次数 |
 | next_attempt_at | timestamptz | 下次尝试时间 |
 | sent_at | timestamptz | 发送时间 |
 | acked_at | timestamptz | ACK时间 |
-| ack_result | varchar(64) | written/accepted/write_failed等 |
+| ack_result | varchar(64) | ack_result |
 | ack_detail | jsonb | ACK详情 |
 | last_error | text | 最近错误 |
 | created_at | timestamptz | 创建时间 |
@@ -366,8 +483,8 @@
 | approval_request_id | uuid | 审批单 |
 | client_instance_id | uuid | 目标客户端实例 |
 | user_id | uuid | 目标用户 |
-| client_type | varchar(32) | 客户端类型 |
-| channel | varchar(32) | websocket/push |
+| client_type | varchar(32) | client_type |
+| channel | varchar(32) | notification_channel |
 | status | varchar(32) | notification_status |
 | sent_at | timestamptz | 发送时间 |
 | read_at | timestamptz | 已读时间 |
@@ -394,7 +511,7 @@
 | tenant_id | uuid | 租户 |
 | session_id | uuid | 会话 |
 | sequence_no | bigint | 输出序号 |
-| stream_type | varchar(16) | stdout/stderr/terminal |
+| stream_type | varchar(16) | output_stream_type |
 | content_redacted | text | 脱敏后内容 |
 | content_hash | varchar(128) | 原始内容哈希 |
 | created_at | timestamptz | 创建时间 |
@@ -417,12 +534,12 @@
 | owner_user_id | uuid | 用户级策略，可为空 |
 | name | varchar(128) | 策略名称 |
 | priority | integer | 优先级，数字越小越先匹配 |
-| cli_type | varchar(64) | CLI 类型，可为空表示全部 |
+| cli_type | varchar(64) | cli_type，可为空表示全部 |
 | event_type | varchar(64) | 事件类型，可为空表示全部 |
-| risk_level | varchar(32) | 风险等级，可为空表示全部 |
+| risk_level | varchar(32) | risk_level，可为空表示全部 |
 | device_selector | jsonb | 设备匹配规则 |
 | command_pattern | varchar(512) | 命令匹配模式 |
-| decision | varchar(32) | manual/auto_reject/auto_approve |
+| decision | varchar(32) | policy_decision |
 | expires_at | timestamptz | 策略过期时间 |
 | enabled | boolean | 是否启用 |
 | reason | text | 审计备注 |
@@ -441,12 +558,12 @@
 |---|---|---|
 | id | bigserial | 主键 |
 | tenant_id | uuid | 租户 |
-| actor_type | varchar(32) | user/system/device/policy |
+| actor_type | varchar(32) | actor_type |
 | actor_id | varchar(64) | 行为主体 |
 | action | varchar(128) | 行为名称 |
 | target_type | varchar(64) | 目标类型 |
 | target_id | varchar(64) | 目标 ID |
-| result | varchar(32) | success/failure/conflict |
+| result | varchar(32) | audit_result |
 | trace_id | varchar(64) | 链路 ID |
 | request_id | varchar(64) | 请求 ID |
 | detail | jsonb | 扩展内容 |

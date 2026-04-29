@@ -193,7 +193,7 @@ stateDiagram-v2
 
 处理方记录：
 
-- `decided_by_actor_type`: `user`、`system`、`policy`、`local`。
+- `decided_by_actor_type`: `user`、`device`、`system`、`policy`、`local`。
 - `decided_by_actor_id`: 用户 ID、系统任务 ID 或策略 ID。
 - `decided_from_client_instance_id`: 提交审批动作的客户端实例。
 - `decided_from_client_type`: `web`、`mobile_ios`、`mobile_android`、`agent_desktop`。

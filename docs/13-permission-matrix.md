@@ -26,6 +26,7 @@
 - `device`: Agent 设备身份。
 - `system`: Worker、超时任务。
 - `policy`: 策略引擎。
+- `local`: Agent 观察到的本地终端接管或本地输入事件。
 
 ## 2. 基本原则
 

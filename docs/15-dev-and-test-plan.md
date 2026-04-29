@@ -51,7 +51,35 @@ scripts/
 - 修改权限必须同步 `docs/13-permission-matrix.md`。
 - Agent 新增 CLI 适配器必须补样本测试。
 
-## 4. 本地环境
+## 4. 并行开工门禁
+
+四端可以并行开发，但必须先满足 M0 门禁：
+
+- `schema/openapi.yaml`、`schema/enums.yaml`、`schema/errors.yaml` 和 `schema/ws/*.schema.json` 存在并可 lint。
+- Server、Agent、Web、Mobile 都有最小启动命令。
+- `deploy/docker-compose.yml` 能启动 PostgreSQL、Redis、OIDC 和 Server。
+- 默认租户和测试用户初始化脚本存在。
+- fake CLI 存在，能稳定输出一个审批 prompt 并等待 approve/reject/reply 输入。
+- Web、Mobile 能基于 schema 生成或校验 API client。
+- Agent 和 Server 对共享枚举、WS 消息类型和协议版本有对照测试。
+
+未满足门禁时允许做：
+
+- 工程脚手架。
+- 构建配置。
+- 登录页静态结构。
+- 纯本地 UI 组件。
+- Agent PTY 原型和 Detector 样本实验。
+
+未满足门禁时不允许做：
+
+- 私自定义接口字段。
+- 私自定义 WebSocket 消息。
+- 私自定义枚举或错误码。
+- 让 Web/Mobile 依赖临时后端响应结构。
+- 让 Agent 上报 schema 之外的事件。
+
+## 5. 本地环境
 
 基础依赖：
 
@@ -74,7 +102,7 @@ Agent
 Mobile Emulator/Device
 ```
 
-## 5. 环境变量
+## 6. 环境变量
 
 根目录提供：
 
@@ -94,29 +122,29 @@ mobile/.env.example
 - Push credentials。
 - 加密密钥。
 
-## 6. 本地启动顺序
+## 7. 本地启动顺序
 
-### 6.1 基础服务
+### 7.1 基础服务
 
 ```bash
 docker compose -f deploy/docker-compose.yml up -d postgres redis authentik
 ```
 
-### 6.2 数据库迁移
+### 7.2 数据库迁移
 
 ```bash
 cd server
 go run ./cmd/migrate up
 ```
 
-### 6.3 Server
+### 7.3 Server
 
 ```bash
 cd server
 go run ./cmd/server
 ```
 
-### 6.4 Web
+### 7.4 Web
 
 ```bash
 cd web-admin
@@ -124,7 +152,7 @@ npm install
 npm run dev
 ```
 
-### 6.5 Agent
+### 7.5 Agent
 
 ```bash
 cd agent
@@ -133,7 +161,7 @@ go run ./cmd/agent register --activation-code <code>
 go run ./cmd/agent run -- codex
 ```
 
-### 6.6 Mobile
+### 7.6 Mobile
 
 ```bash
 cd mobile
@@ -141,7 +169,7 @@ flutter pub get
 flutter run
 ```
 
-## 7. 本地 OIDC
+## 8. 本地 OIDC
 
 开发环境需要预置：
 
@@ -160,7 +188,7 @@ flutter run
 - 四个测试用户。
 - 对应成员角色。
 
-## 8. Push 本地降级
+## 9. Push 本地降级
 
 MVP 本地联调不强依赖真实 FCM/APNs。
 
@@ -171,9 +199,9 @@ MVP 本地联调不强依赖真实 FCM/APNs。
 - Mobile 前台通过 WebSocket 收通知。
 - 真实 Push 放到 M6。
 
-## 9. 测试分层
+## 10. 测试分层
 
-### 9.1 Server 单元测试
+### 10.1 Server 单元测试
 
 覆盖：
 
@@ -188,7 +216,7 @@ MVP 本地联调不强依赖真实 FCM/APNs。
 - domain service 不依赖真实数据库。
 - 状态转移表中的每条关键转移都有测试。
 
-### 9.2 Server 集成测试
+### 10.2 Server 集成测试
 
 覆盖：
 
@@ -204,7 +232,7 @@ MVP 本地联调不强依赖真实 FCM/APNs。
 - 每个测试隔离租户和数据。
 - 验证错误码和 HTTP 状态码。
 
-### 9.3 Agent 单元测试
+### 10.3 Agent 单元测试
 
 覆盖：
 
@@ -219,7 +247,7 @@ MVP 本地联调不强依赖真实 FCM/APNs。
 - 不依赖真实 AI CLI。
 - 使用 PTY 输出样本回放。
 
-### 9.4 Agent 集成测试
+### 10.4 Agent 集成测试
 
 覆盖：
 
@@ -237,7 +265,17 @@ test-fixtures/fake-ai-cli
 
 它可以输出固定审批 prompt 并等待输入。
 
-### 9.5 Web 测试
+fake CLI 最小行为：
+
+- 启动后输出固定 session 文本和一个审批 prompt。
+- 支持 `approve`、`reject`、`reply` 三类输入路径。
+- approve 后输出继续执行标记并以退出码 `0` 结束。
+- reject 后输出拒绝标记并以非零退出码结束。
+- reply 后回显脱敏后的回复摘要并继续或退出，行为需在样本中固定。
+- 支持注入 ANSI 样式、光标刷新和换行差异，供 Terminal Normalizer 回归测试。
+- 支持延迟 ACK 场景，用于测试投递超时和重试。
+
+### 10.5 Web 测试
 
 覆盖：
 
@@ -253,7 +291,7 @@ test-fixtures/fake-ai-cli
 - 组件测试覆盖核心状态。
 - Playwright 覆盖主流程。
 
-### 9.6 Mobile 测试
+### 10.6 Mobile 测试
 
 覆盖：
 
@@ -266,7 +304,36 @@ test-fixtures/fake-ai-cli
 
 MVP 至少保留冒烟测试脚本和手工测试清单。
 
-## 10. 端到端场景
+## 11. 前端和移动端页面状态
+
+Web 和 Mobile 至少覆盖以下 UI 状态：
+
+- 未登录。
+- 已登录但无租户。
+- 无设备授权。
+- 设备空列表。
+- 设备 offline、suspect_offline、disabled。
+- 会话空列表。
+- 会话 running、waiting_approval、completed、failed、lost。
+- 审批 waiting_decision、delivering、delivered、delivery_failed、expired、cancelled_by_local_input。
+- 审批提交中。
+- 审批已由其他端处理。
+- 审批提交 409 冲突。
+- 权限不足 403。
+- 网络断开和重连。
+- 未知枚举降级展示。
+
+页面实现要求：
+
+- 列表页必须支持重新拉取和分页。
+- 详情页刷新后必须从 API 获取最终状态。
+- WebSocket 只触发提醒和局部刷新，不作为唯一状态来源。
+- 审批按钮在提交中必须防重复点击。
+- 409 冲突必须展示最终处理方、处理端和处理时间。
+- viewer 角色只能看到只读动作，不能展示可点击审批按钮。
+- Push 打开后必须通过 API 拉取详情，不能信任 Push payload。
+
+## 12. 端到端场景
 
 ### E2E-1: 设备绑定
 
@@ -315,7 +382,7 @@ MVP 至少保留冒烟测试脚本和手工测试清单。
 4. Agent 重连。
 5. Agent 收到 timeout_reject 投递并 ACK。
 
-## 11. CLI 适配器测试样本
+## 13. CLI 适配器测试样本
 
 建议目录：
 
@@ -337,8 +404,11 @@ agent/testdata/adapters/
 - 期望 TerminalSnapshot。
 - 期望 DetectedEvent。
 - 期望 approve/reject/reply 写入字节。
+- 期望 idempotency_key 输入材料说明。
+- 期望误识别抑制行为，例如同一 prompt 重绘不重复上报。
+- 期望 prompt 消失后的本地状态变化。
 
-## 12. 契约测试
+## 14. 契约测试
 
 契约测试要求：
 
@@ -347,8 +417,12 @@ agent/testdata/adapters/
 - Web 生成 client 后不能有 TypeScript 类型错误。
 - Mobile client 模型不能缺少必填字段。
 - Agent protocol 类型和 schema 枚举一致。
+- `schema/errors.yaml` 中的错误码必须和 Server 实际返回一致。
+- `schema/enums.yaml` 中的枚举必须和数据模型、状态转移表一致。
+- WS envelope 必须包含 `type`、`message_id`、`trace_id`、`sent_at`、`schema_version`、`payload`。
+- 审批决策、Agent ACK、设备心跳必须覆盖幂等重试测试。
 
-## 13. CI 建议
+## 15. CI 建议
 
 最小 CI：
 
@@ -372,7 +446,7 @@ agent fake-cli e2e
 web playwright smoke
 ```
 
-## 14. 手工验收清单
+## 16. 手工验收清单
 
 每个里程碑发布前检查：
 
@@ -383,7 +457,7 @@ web playwright smoke
 - 审计记录包含 actor、client_instance、device、session、trace_id。
 - Push 降级不影响审批主流程。
 
-## 15. 缺陷分级
+## 17. 缺陷分级
 
 - P0: 审批状态错误、越权审批、决策丢失、敏感明文泄露。
 - P1: Agent 无法回写、重复审批、设备无法重连、多端同步错误。
