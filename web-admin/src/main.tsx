@@ -122,6 +122,18 @@ type Approval = {
   expires_at: string;
 };
 
+type AuditLog = {
+  audit_id: number;
+  actor_type: string;
+  actor_id: string;
+  action: string;
+  resource_type: string;
+  resource_id: string;
+  result: string;
+  trace_id: string;
+  created_at: string;
+};
+
 function App() {
   const [language, setLanguage] = useState<Language>("zh");
   const [activationCode, setActivationCode] = useState<string>("");
@@ -129,6 +141,7 @@ function App() {
   const [selectedDeviceID, setSelectedDeviceID] = useState<string>("");
   const [sessions, setSessions] = useState<Session[]>([]);
   const [approvals, setApprovals] = useState<Approval[]>([]);
+  const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
   const [approvalFilter, setApprovalFilter] = useState<ApprovalFilter>("pending");
   const [clientInstanceID, setClientInstanceID] = useState<string>("");
   const [wsState, setWSState] = useState<WSState>("idle");
@@ -155,6 +168,7 @@ function App() {
     });
     refreshDevices();
     refreshApprovals("pending");
+    refreshAuditLogs();
   }, []);
 
   async function registerClientInstance() {
@@ -199,6 +213,7 @@ function App() {
       if (message.type === "approval.created" || message.type === "approval.updated") {
         refreshApprovals(approvalFilterRef.current);
         refreshSessions(selectedDeviceRef.current);
+        refreshAuditLogs();
       }
     };
     socket.onerror = () => setWSState("closed");
@@ -268,6 +283,17 @@ function App() {
     setApprovals(filter === "completed" ? items.filter((item) => completedStatuses.has(item.status)) : items);
   }
 
+  async function refreshAuditLogs() {
+    setError("");
+    const response = await fetch(`/api/v1/tenants/${tenantId}/audit-logs`);
+    if (!response.ok) {
+      setError(await responseErrorMessage(response, text));
+      return;
+    }
+    const body = await response.json();
+    setAuditLogs(body.data.items as AuditLog[]);
+  }
+
   function changeApprovalFilter(filter: ApprovalFilter) {
     setApprovalFilter(filter);
     refreshApprovals(filter);
@@ -295,6 +321,7 @@ function App() {
       }
       await refreshApprovals();
       await refreshSessions();
+      await refreshAuditLogs();
     } finally {
       setSubmittingApprovals((current) => {
         const next = new Set(current);
@@ -461,6 +488,30 @@ function App() {
                   </article>
                 );
               })
+            )}
+          </div>
+        </section>
+        <section className="toolPanel">
+          <div className="toolHeader">
+            <h2>{language === "zh" ? "审计日志" : "Audit logs"}</h2>
+            <div className="toolActions">
+              <button onClick={refreshAuditLogs}>
+                <RefreshCw size={16} />
+                {language === "zh" ? "刷新审计" : "Refresh audit"}
+              </button>
+            </div>
+          </div>
+          <div className="approvalList">
+            {auditLogs.length === 0 ? (
+              <p>{language === "zh" ? "暂无审计日志" : "No audit logs"}</p>
+            ) : (
+              auditLogs.map((log) => (
+                <article className="auditRow" key={log.audit_id}>
+                  <strong>{log.action}</strong>
+                  <span>{log.actor_type} / {log.result}</span>
+                  <span>{shortID(log.resource_id)} / {new Date(log.created_at).toLocaleString()}</span>
+                </article>
+              ))
             )}
           </div>
         </section>
