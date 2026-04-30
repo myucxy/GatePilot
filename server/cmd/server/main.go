@@ -225,6 +225,10 @@ type appError struct {
 	Message    string
 }
 
+type storeHealthChecker interface {
+	ReadyCheck() error
+}
+
 type gatePilotStore interface {
 	RegisterClientInstance(req registerClientInstanceRequest, userID string, idempotencyKey string, now time.Time) (clientInstance, *appError)
 	CreateActivationCode(tenantID string, req createActivationCodeRequest, idempotencyKey string, now time.Time) (string, time.Time, *appError)
@@ -312,6 +316,10 @@ func (s *memoryStore) Reset() {
 	s.devices = map[string]device{}
 	s.sessions = map[string]session{}
 	s.approvals = map[string]approval{}
+}
+
+func (s *memoryStore) ReadyCheck() error {
+	return nil
 }
 
 func (s *memoryStore) RegisterClientInstance(req registerClientInstanceRequest, userID string, idempotencyKey string, now time.Time) (clientInstance, *appError) {
@@ -1015,6 +1023,9 @@ func configureStore() error {
 func newRouter() http.Handler {
 	// 路由集中在这里，测试可以直接复用同一套 HTTP 行为，避免脚本和单测走出不同契约。
 	mux := http.NewServeMux()
+	mux.HandleFunc("/health/live", liveHealthHandler)
+	mux.HandleFunc("/health/ready", readyHealthHandler)
+	mux.HandleFunc("/metrics", metricsHandler)
 	mux.HandleFunc("/api/v1/healthz", healthHandler)
 	mux.HandleFunc("/api/v1/me", meHandler)
 	mux.HandleFunc("/api/v1/client-instances", clientInstancesHandler)
@@ -1223,6 +1234,54 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 		RequestID: requestID(r),
 		TraceID:   traceID(r),
 	})
+}
+
+func liveHealthHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	writeJSON(w, envelope{
+		Data: map[string]string{
+			"status":  "ok",
+			"service": "gatepilot-server",
+			"version": version,
+		},
+		RequestID: requestID(r),
+		TraceID:   traceID(r),
+	})
+}
+
+func readyHealthHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if checker, ok := store.(storeHealthChecker); ok {
+		if err := checker.ReadyCheck(); err != nil {
+			writeError(w, r, http.StatusServiceUnavailable, "dependency_unavailable", err.Error())
+			return
+		}
+	}
+	writeJSON(w, envelope{
+		Data: map[string]any{
+			"status": "ok",
+			"checks": map[string]string{
+				"store": "ok",
+			},
+		},
+		RequestID: requestID(r),
+		TraceID:   traceID(r),
+	})
+}
+
+func metricsHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+	_, _ = fmt.Fprintf(w, "gatepilot_build_info{version=%q} 1\n", version)
 }
 
 func meHandler(w http.ResponseWriter, r *http.Request) {

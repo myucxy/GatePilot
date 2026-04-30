@@ -18,6 +18,9 @@ Persistence status:
 Endpoints:
 
 - `GET /api/v1/healthz`
+- `GET /health/live`
+- `GET /health/ready`
+- `GET /metrics`
 - `GET /api/v1/me`
 - `POST /api/v1/client-instances`
 - `POST /api/v1/tenants/{tenant_id}/device-activation-codes`

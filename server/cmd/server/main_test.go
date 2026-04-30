@@ -66,6 +66,29 @@ func TestDeviceSessionApprovalFlow(t *testing.T) {
 	}
 }
 
+func TestHealthEndpoints(t *testing.T) {
+	resetTestStore()
+	server := httptest.NewServer(newRouter())
+	defer server.Close()
+
+	live := getJSON(t, server.URL+"/health/live", http.StatusOK)
+	if got := dataString(t, live, "status"); got != "ok" {
+		t.Fatalf("live status = %q, want ok", got)
+	}
+	ready := getJSON(t, server.URL+"/health/ready", http.StatusOK)
+	if got := dataString(t, ready, "status"); got != "ok" {
+		t.Fatalf("ready status = %q, want ok", got)
+	}
+	resp, err := http.Get(server.URL + "/metrics")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("metrics status = %d, want 200", resp.StatusCode)
+	}
+}
+
 func TestApprovalAckFailureMarksDeliveryFailed(t *testing.T) {
 	resetTestStore()
 	server := httptest.NewServer(newRouter())

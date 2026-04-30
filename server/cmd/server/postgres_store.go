@@ -31,6 +31,12 @@ func newPostgresStore(databaseURL string) (*postgresStore, error) {
 	return &postgresStore{db: db}, nil
 }
 
+func (s *postgresStore) ReadyCheck() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	return s.db.PingContext(ctx)
+}
+
 func (s *postgresStore) RegisterClientInstance(req registerClientInstanceRequest, userID string, idempotencyKey string, now time.Time) (clientInstance, *appError) {
 	if req.TenantID == "" {
 		return clientInstance{}, &appError{HTTPStatus: http.StatusBadRequest, Code: "message_schema_invalid", Message: "tenant_id is required"}

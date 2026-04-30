@@ -2,9 +2,9 @@ services:
   postgres:
     image: postgres:17
     environment:
-      POSTGRES_DB: gatepilot
-      POSTGRES_USER: gatepilot
-      POSTGRES_PASSWORD: gatepilot_dev
+      POSTGRES_DB: ${POSTGRES_DB:-gatepilot}
+      POSTGRES_USER: ${POSTGRES_USER:-gatepilot}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-gatepilot_dev}
     ports:
       - "5432:5432"
     volumes:
@@ -15,12 +15,58 @@ services:
     ports:
       - "6379:6379"
 
+  authentik-postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: authentik
+      POSTGRES_USER: authentik
+      POSTGRES_PASSWORD: ${AUTHENTIK_POSTGRES_PASSWORD:-authentik_dev}
+    volumes:
+      - gatepilot_authentik_postgres:/var/lib/postgresql/data
+
+  authentik-server:
+    image: ${AUTHENTIK_IMAGE:-ghcr.io/goauthentik/server}:${AUTHENTIK_TAG:-latest}
+    command: server
+    environment:
+      AUTHENTIK_SECRET_KEY: ${AUTHENTIK_SECRET_KEY:-dev-only-change-me}
+      AUTHENTIK_POSTGRESQL__HOST: authentik-postgres
+      AUTHENTIK_POSTGRESQL__USER: authentik
+      AUTHENTIK_POSTGRESQL__NAME: authentik
+      AUTHENTIK_POSTGRESQL__PASSWORD: ${AUTHENTIK_POSTGRES_PASSWORD:-authentik_dev}
+      AUTHENTIK_REDIS__HOST: redis
+    ports:
+      - "9000:9000"
+      - "9443:9443"
+    depends_on:
+      - authentik-postgres
+      - redis
+
+  authentik-worker:
+    image: ${AUTHENTIK_IMAGE:-ghcr.io/goauthentik/server}:${AUTHENTIK_TAG:-latest}
+    command: worker
+    environment:
+      AUTHENTIK_SECRET_KEY: ${AUTHENTIK_SECRET_KEY:-dev-only-change-me}
+      AUTHENTIK_POSTGRESQL__HOST: authentik-postgres
+      AUTHENTIK_POSTGRESQL__USER: authentik
+      AUTHENTIK_POSTGRESQL__NAME: authentik
+      AUTHENTIK_POSTGRESQL__PASSWORD: ${AUTHENTIK_POSTGRES_PASSWORD:-authentik_dev}
+      AUTHENTIK_REDIS__HOST: redis
+    depends_on:
+      - authentik-postgres
+      - redis
+
   server:
     image: golang:1.26
     working_dir: /workspace/server
-    command: go run ./cmd/server
+    command: sh -c "go run ./cmd/migrate up && go run ./cmd/server"
     environment:
-      GATEPILOT_SERVER_ADDR: ":8080"
+      GATEPILOT_SERVER_ADDR: ${GATEPILOT_SERVER_ADDR:-:8080}
+      GATEPILOT_STORE: postgres
+      GATEPILOT_DATABASE_URL: postgres://${POSTGRES_USER:-gatepilot}:${POSTGRES_PASSWORD:-gatepilot_dev}@postgres:5432/${POSTGRES_DB:-gatepilot}?sslmode=disable
+      REDIS_ADDR: ${REDIS_ADDR:-redis:6379}
+      OIDC_ISSUER: ${OIDC_ISSUER:-http://localhost:9000/application/o/gatepilot/}
+      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-gatepilot-web}
+      OIDC_AUDIENCE: ${OIDC_AUDIENCE:-gatepilot}
     ports:
       - "8080:8080"
     volumes:
@@ -28,6 +74,8 @@ services:
     depends_on:
       - postgres
       - redis
+      - authentik-server
 
 volumes:
   gatepilot_postgres:
+  gatepilot_authentik_postgres:
