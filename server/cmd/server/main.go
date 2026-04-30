@@ -133,6 +133,15 @@ type auditLog struct {
 	CreatedAt    string         `json:"created_at"`
 }
 
+type auditLogListRequest struct {
+	TenantID     string
+	ActorType    string
+	Action       string
+	ResourceType string
+	ResourceID   string
+	Limit        int
+}
+
 type outputChunk struct {
 	ChunkID         int64  `json:"chunk_id"`
 	TenantID        string `json:"tenant_id"`
@@ -262,7 +271,7 @@ type gatePilotStore interface {
 	ExpireApprovals(now time.Time) []approval
 	MarkStaleDevicesOffline(now time.Time, offlineAfter time.Duration) []device
 	AppendAuditLog(item auditLog, now time.Time)
-	ListAuditLogs(tenantID string) []auditLog
+	ListAuditLogs(req auditLogListRequest) []auditLog
 	GetSession(sessionID string) (session, *appError)
 	ListDeviceSessions(deviceID string) []session
 	AppendOutputChunk(req createOutputChunkRequest, now time.Time) (outputChunk, *appError)
@@ -926,16 +935,45 @@ func (s *memoryStore) AppendAuditLog(item auditLog, now time.Time) {
 	s.auditLogs = append(s.auditLogs, item)
 }
 
-func (s *memoryStore) ListAuditLogs(tenantID string) []auditLog {
+func (s *memoryStore) ListAuditLogs(req auditLogListRequest) []auditLog {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	limit := normalizedAuditLimit(req.Limit)
 	items := []auditLog{}
 	for i := len(s.auditLogs) - 1; i >= 0; i-- {
-		if s.auditLogs[i].TenantID == tenantID {
-			items = append(items, s.auditLogs[i])
+		item := s.auditLogs[i]
+		if item.TenantID != req.TenantID {
+			continue
+		}
+		if req.ActorType != "" && item.ActorType != req.ActorType {
+			continue
+		}
+		if req.Action != "" && item.Action != req.Action {
+			continue
+		}
+		if req.ResourceType != "" && item.ResourceType != req.ResourceType {
+			continue
+		}
+		if req.ResourceID != "" && item.ResourceID != req.ResourceID {
+			continue
+		}
+		items = append(items, item)
+		if len(items) >= limit {
+			break
 		}
 	}
 	return items
+}
+
+func normalizedAuditLimit(limit int) int {
+	switch {
+	case limit <= 0:
+		return 100
+	case limit > 200:
+		return 200
+	default:
+		return limit
+	}
 }
 
 func (s *memoryStore) GetSession(sessionID string) (session, *appError) {
@@ -1701,15 +1739,34 @@ func listAuditLogsHandler(w http.ResponseWriter, r *http.Request, tenantID strin
 		writeError(w, r, http.StatusForbidden, "role_insufficient", "role cannot view audit logs")
 		return
 	}
+	req := auditLogListRequest{
+		TenantID:     tenantID,
+		ActorType:    r.URL.Query().Get("actor_type"),
+		Action:       r.URL.Query().Get("action"),
+		ResourceType: r.URL.Query().Get("resource_type"),
+		ResourceID:   r.URL.Query().Get("resource_id"),
+		Limit:        parsePositiveInt(r.URL.Query().Get("limit")),
+	}
 	writeJSON(w, envelope{
 		Data: map[string]any{
-			"items":       store.ListAuditLogs(tenantID),
+			"items":       store.ListAuditLogs(req),
 			"next_cursor": nil,
 			"has_more":    false,
 		},
 		RequestID: requestID(r),
 		TraceID:   traceID(r),
 	})
+}
+
+func parsePositiveInt(value string) int {
+	if value == "" {
+		return 0
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil || parsed <= 0 {
+		return 0
+	}
+	return parsed
 }
 
 func submitApprovalDecisionHandler(w http.ResponseWriter, r *http.Request, approvalID string) {

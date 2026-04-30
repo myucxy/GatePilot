@@ -148,6 +148,45 @@ func TestAuditLogsCaptureDecisionAndAck(t *testing.T) {
 	}
 }
 
+func TestAuditLogsSupportFiltersAndLimit(t *testing.T) {
+	resetTestStore()
+	server := httptest.NewServer(newRouter())
+	defer server.Close()
+
+	code := createTestActivationCode(t, server.URL)
+	deviceID := registerTestDevice(t, server.URL, code)
+	sessionID := createTestSession(t, server.URL, deviceID)
+	approvalID := createTestApproval(t, server.URL, deviceID, sessionID)
+
+	postJSON(t, server.URL+"/api/v1/devices/"+deviceID+"/grants", map[string]any{
+		"user_id":    "00000000-0000-0000-0000-000000000099",
+		"permission": "approve",
+	}, http.StatusCreated)
+	decision := postJSON(t, server.URL+"/api/v1/approvals/"+approvalID+"/decision", map[string]any{
+		"decision_type": "approve",
+	}, http.StatusOK)
+	postJSON(t, server.URL+"/api/v1/agent/approval-acks", map[string]any{
+		"approval_id": approvalID,
+		"delivery_id": dataString(t, decision, "delivery_id"),
+		"session_id":  sessionID,
+		"ack_result":  "written",
+		"detail":      map[string]any{"source": "unit-test"},
+	}, http.StatusOK)
+
+	filtered := getJSON(t, server.URL+"/api/v1/tenants/"+testTenantID+"/audit-logs?action=device_grant.create&limit=1", http.StatusOK)
+	items := dataItems(t, filtered)
+	if len(items) != 1 || items[0]["action"] != "device_grant.create" {
+		t.Fatalf("filtered audit logs = %v, want one device_grant.create", items)
+	}
+
+	approvalLogs := getJSON(t, server.URL+"/api/v1/tenants/"+testTenantID+"/audit-logs?resource_type=approval&resource_id="+approvalID, http.StatusOK)
+	for _, item := range dataItems(t, approvalLogs) {
+		if item["resource_type"] != "approval" || item["resource_id"] != approvalID {
+			t.Fatalf("approval audit item = %v, want approval %s", item, approvalID)
+		}
+	}
+}
+
 func TestViewerCannotReadAuditLogs(t *testing.T) {
 	resetTestStore()
 	server := httptest.NewServer(newRouter())

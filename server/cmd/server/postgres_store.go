@@ -1074,15 +1074,29 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10)`,
 		item.TenantID, item.ActorType, nullableUUID(item.ActorID), item.Action, item.ResourceType, nullableUUID(item.ResourceID), item.Result, item.TraceID, string(detailJSON), now)
 }
 
-func (s *postgresStore) ListAuditLogs(tenantID string) []auditLog {
+func (s *postgresStore) ListAuditLogs(req auditLogListRequest) []auditLog {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	rows, err := s.db.QueryContext(ctx, `
+	query := `
 SELECT id, tenant_id::text, actor_type, COALESCE(actor_id::text, ''), action, resource_type, COALESCE(resource_id::text, ''), result, trace_id, detail::text, created_at
 FROM audit_logs
-WHERE tenant_id = $1
-ORDER BY created_at DESC, id DESC
-LIMIT 100`, tenantID)
+WHERE tenant_id = $1`
+	args := []any{req.TenantID}
+	addFilter := func(format string, value string) {
+		if value == "" {
+			return
+		}
+		args = append(args, value)
+		query += fmt.Sprintf(format, len(args))
+	}
+	addFilter(" AND actor_type = $%d", req.ActorType)
+	addFilter(" AND action = $%d", req.Action)
+	addFilter(" AND resource_type = $%d", req.ResourceType)
+	addFilter(" AND resource_id = $%d::uuid", req.ResourceID)
+	args = append(args, normalizedAuditLimit(req.Limit))
+	query += fmt.Sprintf("\nORDER BY created_at DESC, id DESC\nLIMIT $%d", len(args))
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return []auditLog{}
 	}
