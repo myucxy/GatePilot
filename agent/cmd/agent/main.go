@@ -157,6 +157,11 @@ func runManagedCLI(args []string) {
 		"status":      "waiting_decision",
 	}))
 	connectAgent([]string{"--device-id", config.DeviceID, "--wait-delivery"})
+	exitCode := 0
+	if err := updateSessionStatus(config.ServerURL, config.DeviceID, config.DeviceToken, sessionID, "completed", &exitCode, "fake CLI completed"); err != nil {
+		fmt.Fprintf(os.Stderr, "update managed session failed: %v\n", err)
+		os.Exit(1)
+	}
 }
 
 func flushQueue(args []string) {
@@ -731,6 +736,24 @@ func appendOutputChunk(serverURL string, deviceID string, deviceToken string, se
 		return err
 	}
 	_, err = postJSONWithToken(serverURL+"/api/v1/agent/output-chunks", body, deviceToken)
+	return err
+}
+
+func updateSessionStatus(serverURL string, deviceID string, deviceToken string, sessionID string, status string, exitCode *int, summary string) error {
+	payload := map[string]any{
+		"device_id":           deviceID,
+		"session_id":          sessionID,
+		"status":              status,
+		"last_output_summary": summary,
+	}
+	if exitCode != nil {
+		payload["exit_code"] = *exitCode
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	_, err = postJSONWithToken(serverURL+"/api/v1/agent/session-updates", body, deviceToken)
 	return err
 }
 

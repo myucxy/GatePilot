@@ -583,6 +583,133 @@ func TestOutputChunksAppendListAndUpdateSessionSummary(t *testing.T) {
 	}
 }
 
+func TestAgentSessionUpdateCompletesSession(t *testing.T) {
+	resetTestStore()
+	server := httptest.NewServer(newRouter())
+	defer server.Close()
+
+	code := createTestActivationCode(t, server.URL)
+	deviceID := registerTestDevice(t, server.URL, code)
+	sessionID := createTestSession(t, server.URL, deviceID)
+
+	update := postJSON(t, server.URL+"/api/v1/agent/session-updates", map[string]any{
+		"device_id":           deviceID,
+		"session_id":          sessionID,
+		"status":              "completed",
+		"exit_code":           0,
+		"last_output_summary": "fake CLI completed",
+	}, http.StatusOK)
+	if got := dataString(t, update, "status"); got != "completed" {
+		t.Fatalf("session status = %q, want completed", got)
+	}
+	data := update["data"].(map[string]any)
+	if endedAt, ok := data["ended_at"].(string); !ok || endedAt == "" || data["exit_code"] != float64(0) {
+		t.Fatalf("session update data = %v, want ended_at and exit_code", data)
+	}
+
+	detail := getJSON(t, server.URL+"/api/v1/sessions/"+sessionID, http.StatusOK)
+	if got := dataString(t, detail, "status"); got != "completed" {
+		t.Fatalf("session detail status = %q, want completed", got)
+	}
+	if got := detail["data"].(map[string]any)["last_output_summary"]; got != "fake CLI completed" {
+		t.Fatalf("session detail summary = %v, want final summary", got)
+	}
+
+	list := getJSON(t, server.URL+"/api/v1/devices/"+deviceID+"/sessions", http.StatusOK)
+	items := dataItems(t, list)
+	if len(items) != 1 || items[0]["status"] != "completed" || items[0]["exit_code"] != float64(0) {
+		t.Fatalf("sessions list = %v, want completed session", items)
+	}
+}
+
+func TestApprovalAckDoesNotReopenCompletedSession(t *testing.T) {
+	resetTestStore()
+	server := httptest.NewServer(newRouter())
+	defer server.Close()
+
+	code := createTestActivationCode(t, server.URL)
+	deviceID := registerTestDevice(t, server.URL, code)
+	sessionID := createTestSession(t, server.URL, deviceID)
+	approvalID := createTestApproval(t, server.URL, deviceID, sessionID)
+	decision := postJSON(t, server.URL+"/api/v1/approvals/"+approvalID+"/decision", map[string]any{
+		"decision_type": "approve",
+	}, http.StatusOK)
+
+	postJSON(t, server.URL+"/api/v1/agent/session-updates", map[string]any{
+		"device_id":           deviceID,
+		"session_id":          sessionID,
+		"status":              "completed",
+		"exit_code":           0,
+		"last_output_summary": "fake CLI completed",
+	}, http.StatusOK)
+
+	postJSON(t, server.URL+"/api/v1/agent/approval-acks", map[string]any{
+		"approval_id": approvalID,
+		"delivery_id": dataString(t, decision, "delivery_id"),
+		"session_id":  sessionID,
+		"ack_result":  "written",
+		"detail":      map[string]any{"source": "unit-test"},
+	}, http.StatusOK)
+
+	detail := getJSON(t, server.URL+"/api/v1/sessions/"+sessionID, http.StatusOK)
+	data := detail["data"].(map[string]any)
+	if data["status"] != "completed" || data["last_output_summary"] != "fake CLI completed" || data["exit_code"] != float64(0) {
+		t.Fatalf("session detail after delayed ack = %v, want completed session preserved", data)
+	}
+	if data["pending_approval_count"] != float64(0) {
+		t.Fatalf("pending approval count = %v, want 0", data["pending_approval_count"])
+	}
+}
+
+func TestClientWebSocketReceivesSessionCompleted(t *testing.T) {
+	resetTestStore()
+	server := httptest.NewServer(newRouter())
+	defer server.Close()
+
+	clientInstanceID := registerTestClientInstance(t, server.URL)
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/ws/client?tenant_id=" + testTenantID + "&client_instance_id=" + clientInstanceID
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	var connected map[string]any
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if err := conn.ReadJSON(&connected); err != nil {
+		t.Fatal(err)
+	}
+
+	code := createTestActivationCode(t, server.URL)
+	deviceID := registerTestDevice(t, server.URL, code)
+	sessionID := createTestSession(t, server.URL, deviceID)
+	postJSON(t, server.URL+"/api/v1/agent/session-updates", map[string]any{
+		"device_id":           deviceID,
+		"session_id":          sessionID,
+		"status":              "completed",
+		"exit_code":           7,
+		"last_output_summary": "session failed after command",
+	}, http.StatusOK)
+
+	var changed struct {
+		Type    string `json:"type"`
+		Payload struct {
+			SessionID         string `json:"session_id"`
+			Status            string `json:"status"`
+			EndedAt           string `json:"ended_at"`
+			ExitCode          int    `json:"exit_code"`
+			LastOutputSummary string `json:"last_output_summary"`
+		} `json:"payload"`
+	}
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if err := conn.ReadJSON(&changed); err != nil {
+		t.Fatal(err)
+	}
+	if changed.Type != "session.updated" || changed.Payload.SessionID != sessionID || changed.Payload.Status != "completed" || changed.Payload.ExitCode != 7 || changed.Payload.EndedAt == "" {
+		t.Fatalf("session event = %+v, want completed session %s", changed, sessionID)
+	}
+}
+
 func TestDeviceGrantListAndRevoke(t *testing.T) {
 	resetTestStore()
 	server := httptest.NewServer(newRouter())

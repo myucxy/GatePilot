@@ -83,7 +83,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     last_output_summary text NOT NULL DEFAULT '',
     pending_approval_count integer NOT NULL DEFAULT 0,
     started_at timestamptz NOT NULL DEFAULT now(),
-    ended_at timestamptz
+    ended_at timestamptz,
+    exit_code integer
 );
 
 CREATE TABLE IF NOT EXISTS approval_requests (

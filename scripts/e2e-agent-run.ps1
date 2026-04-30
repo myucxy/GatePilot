@@ -121,6 +121,10 @@ try {
     if ($outputChunks.data.items.Count -lt 1) {
         throw "agent run did not append output chunks"
     }
+    $session = Invoke-RestMethod -Uri "$serverURL/api/v1/sessions/$sessionId"
+    if ($session.data.status -ne "completed" -or $session.data.exit_code -ne 0) {
+        throw "agent run did not complete session: $($session | ConvertTo-Json -Compress)"
+    }
 
     [pscustomobject]@{
         device_id = $registered.data.device_id
@@ -129,6 +133,8 @@ try {
         delivery_id = $decision.data.delivery_id
         final_status = $finalApproval.status
         delivery_status = $finalApproval.delivery_status
+        session_status = $session.data.status
+        session_exit_code = $session.data.exit_code
         output_chunk_count = $outputChunks.data.items.Count
         ack_written = $true
     } | ConvertTo-Json

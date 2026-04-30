@@ -30,6 +30,7 @@ Endpoints:
 - `DELETE /api/v1/devices/{device_id}/grants/{grant_id}`
 - `POST /api/v1/agent/register`
 - `POST /api/v1/agent/sessions`
+- `POST /api/v1/agent/session-updates`
 - `GET /api/v1/devices/{device_id}/sessions`
 - `GET /api/v1/sessions/{session_id}`
 - `GET /api/v1/sessions/{session_id}/output-chunks`

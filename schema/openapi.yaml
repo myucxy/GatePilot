@@ -212,6 +212,32 @@ paths:
           $ref: "#/components/responses/ErrorResponse"
         "404":
           $ref: "#/components/responses/ErrorResponse"
+  /agent/session-updates:
+    post:
+      operationId: updateAgentSession
+      summary: Update a CLI session status reported by Agent
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateAgentSessionRequest"
+      responses:
+        "200":
+          description: Session updated
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/Session"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
   /agent/approvals:
     post:
       operationId: createAgentApproval
@@ -876,6 +902,31 @@ components:
           type: string
         last_output_summary:
           type: string
+    UpdateAgentSessionRequest:
+      type: object
+      required:
+        - device_id
+        - session_id
+        - status
+      properties:
+        device_id:
+          type: string
+        session_id:
+          type: string
+        status:
+          type: string
+          enum:
+            - running
+            - waiting_approval
+            - completed
+            - failed
+            - closed
+            - lost
+        exit_code:
+          type: integer
+          nullable: true
+        last_output_summary:
+          type: string
     Session:
       type: object
       required:
@@ -910,6 +961,13 @@ components:
         started_at:
           type: string
           format: date-time
+        ended_at:
+          type: string
+          format: date-time
+          nullable: true
+        exit_code:
+          type: integer
+          nullable: true
         last_output_summary:
           type: string
         pending_approval_count:

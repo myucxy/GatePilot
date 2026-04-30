@@ -10,7 +10,7 @@
         "type": { "const": "session.updated" },
         "payload": {
           "type": "object",
-          "required": ["tenant_id", "session_id", "device_id", "status", "pending_approval_count", "last_output_summary"],
+          "required": ["tenant_id", "session_id", "device_id", "status", "ended_at", "exit_code", "pending_approval_count", "last_output_summary"],
           "properties": {
             "tenant_id": { "type": "string" },
             "session_id": { "type": "string" },
@@ -18,6 +18,8 @@
             "status": {
               "enum": ["starting", "running", "waiting_approval", "completed", "failed", "closed", "lost"]
             },
+            "ended_at": { "type": ["string", "null"], "format": "date-time" },
+            "exit_code": { "type": ["integer", "null"] },
             "pending_approval_count": { "type": "integer", "minimum": 0 },
             "last_output_summary": { "type": "string" }
           },

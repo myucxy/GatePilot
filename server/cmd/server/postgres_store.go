@@ -341,6 +341,49 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 0, $9)`,
 	return item, nil
 }
 
+func (s *postgresStore) UpdateSession(req updateAgentSessionRequest, now time.Time) (session, *appError) {
+	if req.DeviceID == "" || req.SessionID == "" {
+		return session{}, &appError{HTTPStatus: http.StatusBadRequest, Code: "message_schema_invalid", Message: "device_id and session_id are required"}
+	}
+	if req.Status == "" {
+		req.Status = "running"
+	}
+	switch req.Status {
+	case "running", "waiting_approval", "completed", "failed", "closed", "lost":
+	default:
+		return session{}, &appError{HTTPStatus: http.StatusBadRequest, Code: "message_schema_invalid", Message: "invalid session status"}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	endedAt := any(nil)
+	switch req.Status {
+	case "completed", "failed", "closed", "lost":
+		endedAt = now
+	}
+	exitCode := any(nil)
+	if req.ExitCode != nil {
+		exitCode = *req.ExitCode
+	}
+	row := s.db.QueryRowContext(ctx, `
+UPDATE sessions
+SET status = $1,
+    ended_at = COALESCE(ended_at, $2),
+    exit_code = CASE WHEN $3::boolean THEN $4 ELSE exit_code END,
+    last_output_summary = CASE WHEN $5 <> '' THEN $5 ELSE last_output_summary END
+WHERE id = $6 AND device_id = $7
+RETURNING id::text, tenant_id::text, device_id::text, cli_type, status, started_at, ended_at, exit_code, last_output_summary, pending_approval_count`,
+		req.Status, endedAt, req.ExitCode != nil, exitCode, req.LastOutputSummary, req.SessionID, req.DeviceID)
+	item, err := scanSession(row)
+	if err == sql.ErrNoRows {
+		return session{}, &appError{HTTPStatus: http.StatusNotFound, Code: "agent_session_not_found", Message: "session not found"}
+	}
+	if err != nil {
+		return session{}, internalStoreError(err)
+	}
+	return item, nil
+}
+
 func (s *postgresStore) CreateApproval(req createAgentApprovalRequest, now time.Time) (approval, *appError) {
 	if req.EventType == "" {
 		req.EventType = "permission_request"
@@ -640,9 +683,15 @@ WHERE id = $4`, nextDeliveryStatus, req.AckResult, string(detailJSON), req.Deliv
 	}
 	_, err = tx.ExecContext(ctx, `
 UPDATE sessions
-SET status = 'running',
+SET status = CASE
+        WHEN status IN ('completed', 'failed', 'closed', 'lost') THEN status
+        ELSE 'running'
+    END,
     pending_approval_count = GREATEST(pending_approval_count - 1, 0),
-    last_output_summary = $1
+    last_output_summary = CASE
+        WHEN status IN ('completed', 'failed', 'closed', 'lost') THEN last_output_summary
+        ELSE $1
+    END
 WHERE id = $2`, "approval "+nextStatus, req.SessionID)
 	if err != nil {
 		return nil, internalStoreError(err)
@@ -966,19 +1015,16 @@ func (s *postgresStore) GetSession(sessionID string) (session, *appError) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	row := s.db.QueryRowContext(ctx, `
-SELECT id::text, tenant_id::text, device_id::text, cli_type, status, started_at, last_output_summary, pending_approval_count
+SELECT id::text, tenant_id::text, device_id::text, cli_type, status, started_at, ended_at, exit_code, last_output_summary, pending_approval_count
 FROM sessions
 WHERE id = $1`, sessionID)
-	var item session
-	var startedAt time.Time
-	err := row.Scan(&item.SessionID, &item.TenantID, &item.DeviceID, &item.CLIType, &item.Status, &startedAt, &item.LastOutputSummary, &item.PendingApprovals)
+	item, err := scanSession(row)
 	if err == sql.ErrNoRows {
 		return session{}, &appError{HTTPStatus: http.StatusNotFound, Code: "agent_session_not_found", Message: "session not found"}
 	}
 	if err != nil {
 		return session{}, internalStoreError(err)
 	}
-	item.StartedAt = startedAt.Format(time.RFC3339)
 	return item, nil
 }
 
@@ -986,7 +1032,7 @@ func (s *postgresStore) ListDeviceSessions(deviceID string) []session {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	rows, err := s.db.QueryContext(ctx, `
-SELECT id::text, tenant_id::text, device_id::text, cli_type, status, started_at, last_output_summary, pending_approval_count
+SELECT id::text, tenant_id::text, device_id::text, cli_type, status, started_at, ended_at, exit_code, last_output_summary, pending_approval_count
 FROM sessions
 WHERE device_id = $1
 ORDER BY started_at DESC`, deviceID)
@@ -997,12 +1043,10 @@ ORDER BY started_at DESC`, deviceID)
 
 	items := []session{}
 	for rows.Next() {
-		var item session
-		var startedAt time.Time
-		if err := rows.Scan(&item.SessionID, &item.TenantID, &item.DeviceID, &item.CLIType, &item.Status, &startedAt, &item.LastOutputSummary, &item.PendingApprovals); err != nil {
+		item, err := scanSession(rows)
+		if err != nil {
 			return []session{}
 		}
-		item.StartedAt = startedAt.Format(time.RFC3339)
 		items = append(items, item)
 	}
 	return items
@@ -1303,6 +1347,30 @@ type deviceGrantScanner interface {
 
 type outputChunkScanner interface {
 	Scan(dest ...any) error
+}
+
+type sessionScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanSession(scanner sessionScanner) (session, error) {
+	var item session
+	var startedAt time.Time
+	var endedAt sql.NullTime
+	var exitCode sql.NullInt64
+	err := scanner.Scan(&item.SessionID, &item.TenantID, &item.DeviceID, &item.CLIType, &item.Status, &startedAt, &endedAt, &exitCode, &item.LastOutputSummary, &item.PendingApprovals)
+	if err != nil {
+		return session{}, err
+	}
+	item.StartedAt = startedAt.Format(time.RFC3339)
+	if endedAt.Valid {
+		item.EndedAt = endedAt.Time.Format(time.RFC3339)
+	}
+	if exitCode.Valid {
+		value := int(exitCode.Int64)
+		item.ExitCode = &value
+	}
+	return item, nil
 }
 
 func scanApproval(scanner approvalScanner) (approval, error) {

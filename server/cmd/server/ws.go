@@ -281,6 +281,8 @@ func sessionUpdatedEnvelope(item session) map[string]any {
 		"session_id":             item.SessionID,
 		"device_id":              item.DeviceID,
 		"status":                 item.Status,
+		"ended_at":               nullableString(item.EndedAt),
+		"exit_code":              nullableInt(item.ExitCode),
 		"pending_approval_count": item.PendingApprovals,
 		"last_output_summary":    item.LastOutputSummary,
 	})
@@ -387,6 +389,13 @@ func nullableMap(value map[string]string) any {
 		return nil
 	}
 	return value
+}
+
+func nullableInt(value *int) any {
+	if value == nil {
+		return nil
+	}
+	return *value
 }
 
 func writeWSError(conn *websocket.Conn, traceID string, code string, message string) {

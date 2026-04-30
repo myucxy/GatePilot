@@ -181,3 +181,40 @@ func TestFlushQueuedApprovalsPostsAndRemovesEvents(t *testing.T) {
 		t.Fatalf("queue items = %+v, want empty", items)
 	}
 }
+
+func TestUpdateSessionStatusPostsLifecyclePayload(t *testing.T) {
+	received := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/agent/session-updates" {
+			t.Fatalf("path = %s, want session-updates", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer token-1" {
+			t.Fatalf("authorization = %q, want bearer token", got)
+		}
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+		if payload["device_id"] != "device-1" || payload["session_id"] != "session-1" || payload["status"] != "completed" {
+			t.Fatalf("payload = %v, want completed session update", payload)
+		}
+		if payload["exit_code"] != float64(0) {
+			t.Fatalf("exit_code = %v, want 0", payload["exit_code"])
+		}
+		if payload["last_output_summary"] != "fake CLI completed" {
+			t.Fatalf("summary = %v, want final summary", payload["last_output_summary"])
+		}
+		received++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"session_id":"session-1","status":"completed"}}`))
+	}))
+	defer server.Close()
+
+	exitCode := 0
+	if err := updateSessionStatus(server.URL, "device-1", "token-1", "session-1", "completed", &exitCode, "fake CLI completed"); err != nil {
+		t.Fatal(err)
+	}
+	if received != 1 {
+		t.Fatalf("received = %d, want 1", received)
+	}
+}

@@ -65,6 +65,8 @@ type session struct {
 	CLIType           string `json:"cli_type"`
 	Status            string `json:"status"`
 	StartedAt         string `json:"started_at"`
+	EndedAt           string `json:"ended_at,omitempty"`
+	ExitCode          *int   `json:"exit_code,omitempty"`
 	LastOutputSummary string `json:"last_output_summary"`
 	PendingApprovals  int    `json:"pending_approval_count"`
 }
@@ -165,6 +167,14 @@ type createAgentSessionRequest struct {
 	LastOutputSummary   string `json:"last_output_summary"`
 }
 
+type updateAgentSessionRequest struct {
+	DeviceID          string `json:"device_id"`
+	SessionID         string `json:"session_id"`
+	Status            string `json:"status"`
+	ExitCode          *int   `json:"exit_code"`
+	LastOutputSummary string `json:"last_output_summary"`
+}
+
 type createAgentApprovalRequest struct {
 	DeviceID       string   `json:"device_id"`
 	SessionID      string   `json:"session_id"`
@@ -235,6 +245,7 @@ type gatePilotStore interface {
 	ListDevices(tenantID string) []device
 	RegisterAgent(req registerAgentRequest, now time.Time) (device, string, *appError)
 	CreateSession(req createAgentSessionRequest, now time.Time) (session, *appError)
+	UpdateSession(req updateAgentSessionRequest, now time.Time) (session, *appError)
 	CreateApproval(req createAgentApprovalRequest, now time.Time) (approval, *appError)
 	GetApproval(approvalID string) (approval, *appError)
 	ListApprovals(tenantID string, status string) []approval
@@ -498,6 +509,39 @@ func (s *memoryStore) CreateSession(req createAgentSessionRequest, now time.Time
 	return item, nil
 }
 
+func (s *memoryStore) UpdateSession(req updateAgentSessionRequest, now time.Time) (session, *appError) {
+	if req.DeviceID == "" || req.SessionID == "" {
+		return session{}, &appError{HTTPStatus: http.StatusBadRequest, Code: "message_schema_invalid", Message: "device_id and session_id are required"}
+	}
+	if req.Status == "" {
+		req.Status = "running"
+	}
+	switch req.Status {
+	case "running", "waiting_approval", "completed", "failed", "closed", "lost":
+	default:
+		return session{}, &appError{HTTPStatus: http.StatusBadRequest, Code: "message_schema_invalid", Message: "invalid session status"}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	item, ok := s.sessions[req.SessionID]
+	if !ok || item.DeviceID != req.DeviceID {
+		return session{}, &appError{HTTPStatus: http.StatusNotFound, Code: "agent_session_not_found", Message: "session not found"}
+	}
+	item.Status = req.Status
+	if req.LastOutputSummary != "" {
+		item.LastOutputSummary = req.LastOutputSummary
+	}
+	switch req.Status {
+	case "completed", "failed", "closed", "lost":
+		if item.EndedAt == "" {
+			item.EndedAt = now.Format(time.RFC3339)
+		}
+		item.ExitCode = req.ExitCode
+	}
+	s.sessions[item.SessionID] = item
+	return item, nil
+}
+
 func (s *memoryStore) CreateApproval(req createAgentApprovalRequest, now time.Time) (approval, *appError) {
 	if req.EventType == "" {
 		req.EventType = "permission_request"
@@ -657,14 +701,25 @@ func (s *memoryStore) AckApprovalDecision(req ackApprovalDecisionRequest) (map[s
 	s.approvals[item.ApprovalID] = item
 
 	if sessionItem, ok := s.sessions[item.SessionID]; ok {
-		sessionItem.Status = "running"
+		if !isTerminalSessionStatus(sessionItem.Status) {
+			sessionItem.Status = "running"
+			sessionItem.LastOutputSummary = "approval " + item.DecisionType + " " + item.Status
+		}
 		if sessionItem.PendingApprovals > 0 {
 			sessionItem.PendingApprovals--
 		}
-		sessionItem.LastOutputSummary = "approval " + item.DecisionType + " " + item.Status
 		s.sessions[item.SessionID] = sessionItem
 	}
 	return approvalAckData(item), nil
+}
+
+func isTerminalSessionStatus(status string) bool {
+	switch status {
+	case "completed", "failed", "closed", "lost":
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *memoryStore) CreateDeviceGrant(deviceID string, req createDeviceGrantRequest, grantedBy string, now time.Time) (deviceGrant, *appError) {
@@ -1032,6 +1087,7 @@ func newRouter() http.Handler {
 	mux.HandleFunc("/api/v1/client-instances/", clientInstanceScopedHandler)
 	mux.HandleFunc("/api/v1/agent/register", agentRegisterHandler)
 	mux.HandleFunc("/api/v1/agent/sessions", agentSessionsHandler)
+	mux.HandleFunc("/api/v1/agent/session-updates", agentSessionUpdatesHandler)
 	mux.HandleFunc("/api/v1/agent/approvals", agentApprovalsHandler)
 	mux.HandleFunc("/api/v1/agent/approval-acks", agentApprovalAcksHandler)
 	mux.HandleFunc("/api/v1/agent/output-chunks", agentOutputChunksHandler)
@@ -1416,6 +1472,33 @@ func agentSessionsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeStatusJSON(w, http.StatusCreated, envelope{
+		Data:      item,
+		RequestID: requestID(r),
+		TraceID:   traceID(r),
+	})
+}
+
+func agentSessionUpdatesHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req updateAgentSessionRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, r, http.StatusBadRequest, "message_schema_invalid", err.Error())
+		return
+	}
+	if appErr := store.ValidateDeviceToken(req.DeviceID, bearerToken(r)); appErr != nil {
+		writeAppError(w, r, appErr)
+		return
+	}
+	item, appErr := store.UpdateSession(req, time.Now().UTC())
+	if appErr != nil {
+		writeAppError(w, r, appErr)
+		return
+	}
+	pushSessionUpdatedToClients(item)
+	writeJSON(w, envelope{
 		Data:      item,
 		RequestID: requestID(r),
 		TraceID:   traceID(r),
