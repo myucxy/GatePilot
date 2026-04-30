@@ -89,6 +89,51 @@ func TestApprovalAckFailureMarksDeliveryFailed(t *testing.T) {
 	}
 }
 
+func TestAuditLogsCaptureDecisionAndAck(t *testing.T) {
+	resetTestStore()
+	server := httptest.NewServer(newRouter())
+	defer server.Close()
+
+	code := createTestActivationCode(t, server.URL)
+	deviceID := registerTestDevice(t, server.URL, code)
+	sessionID := createTestSession(t, server.URL, deviceID)
+	approvalID := createTestApproval(t, server.URL, deviceID, sessionID)
+	decision := postJSON(t, server.URL+"/api/v1/approvals/"+approvalID+"/decision", map[string]any{
+		"decision_type": "approve",
+	}, http.StatusOK)
+	postJSON(t, server.URL+"/api/v1/agent/approval-acks", map[string]any{
+		"approval_id": approvalID,
+		"delivery_id": dataString(t, decision, "delivery_id"),
+		"session_id":  sessionID,
+		"ack_result":  "written",
+		"detail":      map[string]any{"source": "unit-test"},
+	}, http.StatusOK)
+
+	body := getJSON(t, server.URL+"/api/v1/tenants/"+testTenantID+"/audit-logs", http.StatusOK)
+	items := dataItems(t, body)
+	actions := map[string]bool{}
+	for _, item := range items {
+		actions[item["action"].(string)] = true
+	}
+	if !actions["approval.decision"] || !actions["approval.delivery_ack"] {
+		t.Fatalf("audit actions = %v, want decision and delivery_ack", actions)
+	}
+}
+
+func TestViewerCannotReadAuditLogs(t *testing.T) {
+	resetTestStore()
+	server := httptest.NewServer(newRouter())
+	defer server.Close()
+
+	body := getJSONWithHeaders(t, server.URL+"/api/v1/tenants/"+testTenantID+"/audit-logs", map[string]string{
+		"X-Dev-Role": "viewer",
+	}, http.StatusForbidden)
+	errorBody, ok := body["error"].(map[string]any)
+	if !ok || errorBody["code"] != "role_insufficient" {
+		t.Fatalf("error code = %v, want role_insufficient", body)
+	}
+}
+
 func TestActivationCodeCanOnlyBeConsumedOnce(t *testing.T) {
 	resetTestStore()
 	server := httptest.NewServer(newRouter())
@@ -737,7 +782,19 @@ func resetTestStore() {
 
 func getJSON(t *testing.T, url string, wantStatus int) map[string]any {
 	t.Helper()
-	resp, err := http.Get(url)
+	return getJSONWithHeaders(t, url, map[string]string{}, wantStatus)
+}
+
+func getJSONWithHeaders(t *testing.T, url string, headers map[string]string, wantStatus int) map[string]any {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for key, value := range headers {
+		req.Header.Set(key, value)
+	}
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}

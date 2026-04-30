@@ -196,3 +196,6 @@ CREATE INDEX IF NOT EXISTS idx_deliveries_device_status_retry ON approval_delive
 CREATE INDEX IF NOT EXISTS idx_deliveries_approval_created ON approval_deliveries(approval_id, created_at DESC);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_notifications_approval_client ON approval_notifications(approval_id, client_instance_id);
 CREATE INDEX IF NOT EXISTS idx_notifications_tenant_user_created ON approval_notifications(tenant_id, user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_audit_logs_tenant_created ON audit_logs(tenant_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_audit_logs_trace ON audit_logs(trace_id);
+CREATE INDEX IF NOT EXISTS idx_audit_logs_resource ON audit_logs(resource_type, resource_id);

@@ -341,6 +341,26 @@ paths:
                     properties:
                       data:
                         $ref: "#/components/schemas/ApprovalListResponse"
+  /tenants/{tenant_id}/audit-logs:
+    get:
+      operationId: listAuditLogs
+      summary: List tenant audit logs
+      parameters:
+        - $ref: "#/components/parameters/TenantId"
+      responses:
+        "200":
+          description: Audit log list
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/AuditLogListResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
   /approvals/{approval_id}/decision:
     post:
       operationId: submitApprovalDecision
@@ -1003,6 +1023,59 @@ components:
               format: uuid
             client_type:
               type: string
+    AuditLog:
+      type: object
+      required:
+        - audit_id
+        - tenant_id
+        - actor_type
+        - action
+        - resource_type
+        - result
+        - trace_id
+        - detail
+        - created_at
+      properties:
+        audit_id:
+          type: integer
+        tenant_id:
+          type: string
+          format: uuid
+        actor_type:
+          type: string
+        actor_id:
+          type: string
+        action:
+          type: string
+        resource_type:
+          type: string
+        resource_id:
+          type: string
+        result:
+          type: string
+        trace_id:
+          type: string
+        detail:
+          type: object
+        created_at:
+          type: string
+          format: date-time
+    AuditLogListResponse:
+      type: object
+      required:
+        - items
+        - next_cursor
+        - has_more
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/AuditLog"
+        next_cursor:
+          type: string
+          nullable: true
+        has_more:
+          type: boolean
     AckAgentApprovalDecisionRequest:
       type: object
       required:

@@ -804,12 +804,66 @@ WHERE id = (SELECT session_id FROM approval_requests WHERE id = $1)`, approvalID
 		if appErr != nil {
 			return []approval{}
 		}
+		detailJSON, _ := json.Marshal(map[string]any{"delivery_id": item.DeliveryID})
+		if _, err := tx.ExecContext(ctx, `
+INSERT INTO audit_logs(tenant_id, actor_type, actor_id, action, resource_type, resource_id, result, trace_id, detail, created_at)
+VALUES ($1, 'system', NULL, 'approval.timeout_reject', 'approval', $2, 'success', 'tr_worker', $3::jsonb, $4)`,
+			item.TenantID, item.ApprovalID, string(detailJSON), now); err != nil {
+			return []approval{}
+		}
 		expired = append(expired, item)
 	}
 	if err := tx.Commit(); err != nil {
 		return []approval{}
 	}
 	return expired
+}
+
+func (s *postgresStore) AppendAuditLog(item auditLog, now time.Time) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if item.Detail == nil {
+		item.Detail = map[string]any{}
+	}
+	detailJSON, err := json.Marshal(item.Detail)
+	if err != nil {
+		return
+	}
+	_, _ = s.db.ExecContext(ctx, `
+INSERT INTO audit_logs(tenant_id, actor_type, actor_id, action, resource_type, resource_id, result, trace_id, detail, created_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10)`,
+		item.TenantID, item.ActorType, nullableUUID(item.ActorID), item.Action, item.ResourceType, nullableUUID(item.ResourceID), item.Result, item.TraceID, string(detailJSON), now)
+}
+
+func (s *postgresStore) ListAuditLogs(tenantID string) []auditLog {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	rows, err := s.db.QueryContext(ctx, `
+SELECT id, tenant_id::text, actor_type, COALESCE(actor_id::text, ''), action, resource_type, COALESCE(resource_id::text, ''), result, trace_id, detail::text, created_at
+FROM audit_logs
+WHERE tenant_id = $1
+ORDER BY created_at DESC, id DESC
+LIMIT 100`, tenantID)
+	if err != nil {
+		return []auditLog{}
+	}
+	defer rows.Close()
+	items := []auditLog{}
+	for rows.Next() {
+		var item auditLog
+		var detailJSON string
+		var createdAt time.Time
+		if err := rows.Scan(&item.AuditID, &item.TenantID, &item.ActorType, &item.ActorID, &item.Action, &item.ResourceType, &item.ResourceID, &item.Result, &item.TraceID, &detailJSON, &createdAt); err != nil {
+			return []auditLog{}
+		}
+		_ = json.Unmarshal([]byte(detailJSON), &item.Detail)
+		if item.Detail == nil {
+			item.Detail = map[string]any{}
+		}
+		item.CreatedAt = createdAt.Format(time.RFC3339)
+		items = append(items, item)
+	}
+	return items
 }
 
 func (s *postgresStore) ListDeviceSessions(deviceID string) []session {

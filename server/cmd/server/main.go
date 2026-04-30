@@ -116,6 +116,20 @@ type deviceGrant struct {
 	RevokedAt  string `json:"revoked_at,omitempty"`
 }
 
+type auditLog struct {
+	AuditID      int64          `json:"audit_id"`
+	TenantID     string         `json:"tenant_id"`
+	ActorType    string         `json:"actor_type"`
+	ActorID      string         `json:"actor_id"`
+	Action       string         `json:"action"`
+	ResourceType string         `json:"resource_type"`
+	ResourceID   string         `json:"resource_id"`
+	Result       string         `json:"result"`
+	TraceID      string         `json:"trace_id"`
+	Detail       map[string]any `json:"detail"`
+	CreatedAt    string         `json:"created_at"`
+}
+
 type createActivationCodeRequest struct {
 	Name             string `json:"name"`
 	ExpiresInSeconds int    `json:"expires_in_seconds"`
@@ -205,6 +219,8 @@ type gatePilotStore interface {
 	CanApproveDevice(tenantID string, deviceID string, userID string) bool
 	RegisterPushToken(clientInstanceID string, req registerPushTokenRequest, now time.Time) (clientInstance, *appError)
 	ExpireApprovals(now time.Time) []approval
+	AppendAuditLog(item auditLog, now time.Time)
+	ListAuditLogs(tenantID string) []auditLog
 	ListDeviceSessions(deviceID string) []session
 	MarkDeviceSeen(deviceID string, now time.Time) *appError
 	MarkClientInstanceSeen(clientInstanceID string, now time.Time) *appError
@@ -223,6 +239,7 @@ type memoryStore struct {
 	clientInstances          map[string]clientInstance
 	approvalNotifications    map[string][]string
 	deviceGrants             map[string]deviceGrant
+	auditLogs                []auditLog
 	devices                  map[string]device
 	sessions                 map[string]session
 	approvals                map[string]approval
@@ -240,6 +257,7 @@ func newMemoryStore() *memoryStore {
 		clientInstances:          map[string]clientInstance{},
 		approvalNotifications:    map[string][]string{},
 		deviceGrants:             map[string]deviceGrant{},
+		auditLogs:                []auditLog{},
 		devices:                  map[string]device{},
 		sessions:                 map[string]session{},
 		approvals:                map[string]approval{},
@@ -257,6 +275,7 @@ func (s *memoryStore) Reset() {
 	s.clientInstances = map[string]clientInstance{}
 	s.approvalNotifications = map[string][]string{}
 	s.deviceGrants = map[string]deviceGrant{}
+	s.auditLogs = []auditLog{}
 	s.devices = map[string]device{}
 	s.sessions = map[string]session{}
 	s.approvals = map[string]approval{}
@@ -684,9 +703,47 @@ func (s *memoryStore) ExpireApprovals(now time.Time) []approval {
 			sessionItem.LastOutputSummary = "approval timeout reject delivering"
 			s.sessions[item.SessionID] = sessionItem
 		}
+		s.auditLogs = append(s.auditLogs, auditLog{
+			AuditID:      int64(len(s.auditLogs) + 1),
+			TenantID:     item.TenantID,
+			ActorType:    "system",
+			ActorID:      "timeout-worker",
+			Action:       "approval.timeout_reject",
+			ResourceType: "approval",
+			ResourceID:   item.ApprovalID,
+			Result:       "success",
+			TraceID:      "tr_worker",
+			Detail:       map[string]any{"delivery_id": item.DeliveryID},
+			CreatedAt:    now.Format(time.RFC3339),
+		})
 		expired = append(expired, item)
 	}
 	return expired
+}
+
+func (s *memoryStore) AppendAuditLog(item auditLog, now time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	item.AuditID = int64(len(s.auditLogs) + 1)
+	if item.CreatedAt == "" {
+		item.CreatedAt = now.Format(time.RFC3339)
+	}
+	if item.Detail == nil {
+		item.Detail = map[string]any{}
+	}
+	s.auditLogs = append(s.auditLogs, item)
+}
+
+func (s *memoryStore) ListAuditLogs(tenantID string) []auditLog {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	items := []auditLog{}
+	for i := len(s.auditLogs) - 1; i >= 0; i-- {
+		if s.auditLogs[i].TenantID == tenantID {
+			items = append(items, s.auditLogs[i])
+		}
+	}
+	return items
 }
 
 func (s *memoryStore) ListDeviceSessions(deviceID string) []session {
@@ -1005,6 +1062,8 @@ func tenantScopedHandler(w http.ResponseWriter, r *http.Request) {
 		listDevicesHandler(w, r, tenantID)
 	case resource == "approvals" && r.Method == http.MethodGet:
 		listApprovalsHandler(w, r, tenantID)
+	case resource == "audit-logs" && r.Method == http.MethodGet:
+		listAuditLogsHandler(w, r, tenantID)
 	default:
 		http.NotFound(w, r)
 	}
@@ -1143,6 +1202,22 @@ func listApprovalsHandler(w http.ResponseWriter, r *http.Request, tenantID strin
 	})
 }
 
+func listAuditLogsHandler(w http.ResponseWriter, r *http.Request, tenantID string) {
+	if devRole(r) != "owner" && devRole(r) != "admin" {
+		writeError(w, r, http.StatusForbidden, "role_insufficient", "role cannot view audit logs")
+		return
+	}
+	writeJSON(w, envelope{
+		Data: map[string]any{
+			"items":       store.ListAuditLogs(tenantID),
+			"next_cursor": nil,
+			"has_more":    false,
+		},
+		RequestID: requestID(r),
+		TraceID:   traceID(r),
+	})
+}
+
 func submitApprovalDecisionHandler(w http.ResponseWriter, r *http.Request, approvalID string) {
 	item, appErr := store.GetApproval(approvalID)
 	if appErr != nil {
@@ -1173,6 +1248,20 @@ func submitApprovalDecisionHandler(w http.ResponseWriter, r *http.Request, appro
 	}
 	pushApprovalDecisionToAgent(item)
 	pushApprovalUpdatedToClients(item)
+	store.AppendAuditLog(auditLog{
+		TenantID:     item.TenantID,
+		ActorType:    decidedBy["actor_type"],
+		ActorID:      decidedBy["actor_id"],
+		Action:       "approval.decision",
+		ResourceType: "approval",
+		ResourceID:   item.ApprovalID,
+		Result:       "success",
+		TraceID:      traceID(r),
+		Detail: map[string]any{
+			"decision_type": item.DecisionType,
+			"delivery_id":   item.DeliveryID,
+		},
+	}, time.Now().UTC())
 
 	writeJSON(w, envelope{
 		Data:      item,
@@ -1214,6 +1303,21 @@ func createDeviceGrantHandler(w http.ResponseWriter, r *http.Request, deviceID s
 		writeAppError(w, r, appErr)
 		return
 	}
+	store.AppendAuditLog(auditLog{
+		TenantID:     item.TenantID,
+		ActorType:    "user",
+		ActorID:      devUserID(r),
+		Action:       "device_grant.create",
+		ResourceType: "device",
+		ResourceID:   deviceID,
+		Result:       "success",
+		TraceID:      traceID(r),
+		Detail: map[string]any{
+			"grant_id":   item.GrantID,
+			"user_id":    item.UserID,
+			"permission": item.Permission,
+		},
+	}, time.Now().UTC())
 	writeStatusJSON(w, http.StatusCreated, envelope{
 		Data:      item,
 		RequestID: requestID(r),
@@ -1264,6 +1368,20 @@ func agentApprovalAcksHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	if item, appErr := store.GetApproval(req.ApprovalID); appErr == nil {
 		pushApprovalUpdatedToClients(item)
+		store.AppendAuditLog(auditLog{
+			TenantID:     item.TenantID,
+			ActorType:    "device",
+			ActorID:      item.DeviceID,
+			Action:       "approval.delivery_ack",
+			ResourceType: "approval",
+			ResourceID:   item.ApprovalID,
+			Result:       req.AckResult,
+			TraceID:      traceID(r),
+			Detail: map[string]any{
+				"delivery_id": req.DeliveryID,
+				"session_id":  req.SessionID,
+			},
+		}, time.Now().UTC())
 	}
 
 	writeJSON(w, envelope{
