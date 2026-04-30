@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://gatepilot.local/schema/ws/approval.detected.schema.json",
+  "title": "approval.detected",
+  "allOf": [
+    { "$ref": "envelope.schema.json" },
+    {
+      "type": "object",
+      "properties": {
+        "type": { "const": "approval.detected" },
+        "payload": {
+          "type": "object",
+          "required": ["event_id", "idempotency_key", "session_id", "sequence_no", "cli_type", "event_type", "risk_level", "prompt_text", "context_before", "suggested_actions", "default_timeout_action", "expires_in_seconds"],
+          "properties": {
+            "event_id": { "type": "string" },
+            "idempotency_key": { "type": "string" },
+            "session_id": { "type": "string" },
+            "sequence_no": { "type": "integer", "minimum": 0 },
+            "cli_type": { "enum": ["codex", "claude_code", "opencode", "copilot", "gemini", "custom"] },
+            "event_type": { "type": "string" },
+            "risk_level": { "enum": ["low", "medium", "high", "critical"] },
+            "prompt_text": { "type": "string" },
+            "context_before": { "type": "string" },
+            "suggested_actions": {
+              "type": "array",
+              "items": { "enum": ["approve", "reject", "reply"] }
+            },
+            "default_timeout_action": { "enum": ["reject"] },
+            "expires_in_seconds": { "type": "integer", "minimum": 1 }
+          },
+          "additionalProperties": false
+        }
+      }
+    }
+  ]
+}

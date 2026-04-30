@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://gatepilot.local/schema/ws/agent.connected.schema.json",
+  "title": "agent.connected",
+  "allOf": [
+    { "$ref": "envelope.schema.json" },
+    {
+      "type": "object",
+      "properties": {
+        "type": { "const": "agent.connected" },
+        "payload": {
+          "type": "object",
+          "required": ["server_time", "accepted_protocol_version", "heartbeat_interval_seconds"],
+          "properties": {
+            "server_time": { "type": "string", "format": "date-time" },
+            "accepted_protocol_version": { "type": "string" },
+            "heartbeat_interval_seconds": { "type": "integer", "minimum": 5 }
+          },
+          "additionalProperties": false
+        }
+      }
+    }
+  ]
+}

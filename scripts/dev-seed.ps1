@@ -1,0 +1,6 @@
+Write-Output "GatePilot dev seed placeholder"
+Write-Output "tenant: 00000000-0000-0000-0000-000000000100"
+Write-Output "owner: owner@example.local"
+Write-Output "admin: admin@example.local"
+Write-Output "approver: approver@example.local"
+Write-Output "viewer: viewer@example.local"

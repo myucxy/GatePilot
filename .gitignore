@@ -1,0 +1,17 @@
+.env
+*.local
+local.properties
+*.iml
+.idea/
+node_modules/
+dist/
+build/
+.gradle/
+.gradle-cache*/
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+bin/
+obj/
+coverage/

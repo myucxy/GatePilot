@@ -1,0 +1,127 @@
+schema_version: "2026-04-01"
+
+enums:
+  tenant_member_role:
+    - owner
+    - admin
+    - approver
+    - viewer
+  common_active_status:
+    - active
+    - disabled
+  device_status:
+    - pending_activation
+    - active
+    - suspect_offline
+    - offline
+    - disabled
+  session_status:
+    - starting
+    - running
+    - waiting_approval
+    - completed
+    - failed
+    - closed
+    - lost
+  approval_status:
+    - created
+    - policy_evaluating
+    - waiting_decision
+    - decided
+    - expired
+    - delivering
+    - delivered
+    - delivery_failed
+    - cancelled_by_local_input
+  decision_type:
+    - approve
+    - reject
+    - reply
+    - timeout_reject
+    - policy_reject
+    - policy_approve
+  delivery_status:
+    - pending
+    - sent
+    - acked
+    - failed
+    - cancelled
+  client_type:
+    - web
+    - mobile_ios
+    - mobile_android
+    - agent_desktop
+  client_instance_status:
+    - active
+    - logged_out
+    - revoked
+  notification_status:
+    - pending
+    - sent
+    - failed
+    - read
+  device_grant_permission:
+    - view
+    - approve
+    - admin
+  device_token_status:
+    - active
+    - rotated
+    - revoked
+  platform:
+    - windows
+    - macos
+    - linux
+    - ios
+    - android
+    - browser
+  arch:
+    - amd64
+    - arm64
+  push_provider:
+    - fcm
+    - apns
+    - webpush
+  notification_channel:
+    - websocket
+    - push
+  output_stream_type:
+    - stdout
+    - stderr
+    - terminal
+  cli_type:
+    - codex
+    - claude_code
+    - opencode
+    - copilot
+    - gemini
+    - custom
+  risk_level:
+    - low
+    - medium
+    - high
+    - critical
+  actor_type:
+    - user
+    - device
+    - system
+    - policy
+    - local
+  ack_result:
+    - written
+    - accepted
+    - session_closed
+    - write_failed
+    - stale_decision
+  policy_decision:
+    - manual
+    - auto_reject
+    - auto_approve
+  action_result:
+    - accepted
+    - duplicate
+    - conflict
+  audit_result:
+    - success
+    - failure
+    - conflict

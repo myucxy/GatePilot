@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://gatepilot.local/schema/ws/approval.decision.ack.schema.json",
+  "title": "approval.decision.ack",
+  "allOf": [
+    { "$ref": "envelope.schema.json" },
+    {
+      "type": "object",
+      "properties": {
+        "type": { "const": "approval.decision.ack" },
+        "payload": {
+          "type": "object",
+          "required": ["delivery_id", "approval_id", "session_id", "ack_result", "detail"],
+          "properties": {
+            "delivery_id": { "type": "string" },
+            "approval_id": { "type": "string" },
+            "session_id": { "type": "string" },
+            "ack_result": { "enum": ["written", "accepted", "session_closed", "write_failed", "stale_decision"] },
+            "detail": { "type": "object" }
+          },
+          "additionalProperties": false
+        }
+      }
+    }
+  ]
+}

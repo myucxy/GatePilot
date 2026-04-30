@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://gatepilot.local/schema/ws/approval.decision.deliver.schema.json",
+  "title": "approval.decision.deliver",
+  "allOf": [
+    { "$ref": "envelope.schema.json" },
+    {
+      "type": "object",
+      "properties": {
+        "type": { "const": "approval.decision.deliver" },
+        "payload": {
+          "type": "object",
+          "required": ["delivery_id", "approval_id", "session_id", "decision_type", "payload", "expires_at"],
+          "properties": {
+            "delivery_id": { "type": "string" },
+            "approval_id": { "type": "string" },
+            "session_id": { "type": "string" },
+            "decision_type": { "enum": ["approve", "reject", "reply", "timeout_reject", "policy_reject", "policy_approve"] },
+            "payload": { "type": ["string", "null"] },
+            "expires_at": { "type": "string", "format": "date-time" }
+          },
+          "additionalProperties": false
+        }
+      }
+    }
+  ]
+}

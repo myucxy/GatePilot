@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://gatepilot.local/schema/ws/approval.updated.schema.json",
+  "title": "approval.updated",
+  "allOf": [
+    { "$ref": "envelope.schema.json" },
+    {
+      "type": "object",
+      "properties": {
+        "type": { "const": "approval.updated" },
+        "payload": {
+          "type": "object",
+          "required": ["tenant_id", "approval_id", "status", "decision_type", "decided_at", "decided_by", "decision_payload", "delivery_status"],
+          "properties": {
+            "tenant_id": { "type": "string" },
+            "approval_id": { "type": "string" },
+            "status": { "enum": ["decided", "delivering", "delivered", "delivery_failed", "expired", "cancelled_by_local_input"] },
+            "decision_type": { "type": ["string", "null"] },
+            "decided_at": { "type": ["string", "null"], "format": "date-time" },
+            "decided_by": {
+              "type": ["object", "null"],
+              "properties": {
+                "actor_type": { "enum": ["user", "device", "system", "policy", "local"] },
+                "actor_id": { "type": "string" },
+                "display_name": { "type": "string" },
+                "client_instance_id": { "type": ["string", "null"] },
+                "client_type": { "type": ["string", "null"] }
+              },
+              "additionalProperties": false
+            },
+            "decision_payload": { "type": ["string", "null"] },
+            "delivery_status": { "type": ["string", "null"] }
+          },
+          "additionalProperties": false
+        }
+      }
+    }
+  ]
+}

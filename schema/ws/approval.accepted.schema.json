@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://gatepilot.local/schema/ws/approval.accepted.schema.json",
+  "title": "approval.accepted",
+  "allOf": [
+    { "$ref": "envelope.schema.json" },
+    {
+      "type": "object",
+      "properties": {
+        "type": { "const": "approval.accepted" },
+        "payload": {
+          "type": "object",
+          "required": ["event_id", "approval_id", "status"],
+          "properties": {
+            "event_id": { "type": "string" },
+            "approval_id": { "type": "string" },
+            "status": { "const": "waiting_decision" }
+          },
+          "additionalProperties": false
+        }
+      }
+    }
+  ]
+}

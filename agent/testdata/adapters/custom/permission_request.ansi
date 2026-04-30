@@ -1,0 +1,3 @@
+GatePilot fake AI CLI
+permission_request: allow command execution? [approve/reject/reply]
+waiting_for_input

@@ -349,6 +349,12 @@ Web 和 Mobile 至少覆盖以下 UI 状态：
 3. Mobile 打开设备详情。
 4. Mobile 查看该设备会话列表和详情。
 
+当前 M2 骨架提供脚本：
+
+```powershell
+.\scripts\e2e-device-session.ps1
+```
+
 ### E2E-3: Web 审批闭环
 
 1. fake CLI 输出审批 prompt。

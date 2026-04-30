@@ -1,0 +1,115 @@
+schema_version: "2026-04-01"
+
+errors:
+  unauthorized:
+    http_status: 401
+    retryable: false
+    message_key: errors.unauthorized
+  token_expired:
+    http_status: 401
+    retryable: true
+    message_key: errors.token_expired
+  forbidden:
+    http_status: 403
+    retryable: false
+    message_key: errors.forbidden
+  tenant_required:
+    http_status: 403
+    retryable: false
+    message_key: errors.tenant_required
+  device_access_denied:
+    http_status: 403
+    retryable: false
+    message_key: errors.device_access_denied
+  role_insufficient:
+    http_status: 403
+    retryable: false
+    message_key: errors.role_insufficient
+  activation_code_invalid:
+    http_status: 422
+    retryable: false
+    message_key: errors.activation_code_invalid
+  activation_code_expired:
+    http_status: 422
+    retryable: false
+    message_key: errors.activation_code_expired
+  activation_code_consumed:
+    http_status: 409
+    retryable: false
+    message_key: errors.activation_code_consumed
+  device_disabled:
+    http_status: 403
+    retryable: false
+    message_key: errors.device_disabled
+  device_token_invalid:
+    http_status: 401
+    retryable: false
+    message_key: errors.device_token_invalid
+  device_offline:
+    http_status: 409
+    retryable: true
+    message_key: errors.device_offline
+  approval_not_found:
+    http_status: 404
+    retryable: false
+    message_key: errors.approval_not_found
+  approval_already_decided:
+    http_status: 409
+    retryable: false
+    message_key: errors.approval_already_decided
+  approval_expired:
+    http_status: 409
+    retryable: false
+    message_key: errors.approval_expired
+  approval_not_waiting_decision:
+    http_status: 409
+    retryable: false
+    message_key: errors.approval_not_waiting_decision
+  approval_decision_duplicate:
+    http_status: 200
+    retryable: false
+    message_key: errors.approval_decision_duplicate
+  approval_decision_conflict:
+    http_status: 409
+    retryable: false
+    message_key: errors.approval_decision_conflict
+  delivery_not_found:
+    http_status: 404
+    retryable: false
+    message_key: errors.delivery_not_found
+  delivery_already_acked:
+    http_status: 409
+    retryable: false
+    message_key: errors.delivery_already_acked
+  delivery_failed:
+    http_status: 409
+    retryable: true
+    message_key: errors.delivery_failed
+  agent_session_not_found:
+    http_status: 404
+    retryable: true
+    message_key: errors.agent_session_not_found
+  agent_session_closed:
+    http_status: 409
+    retryable: false
+    message_key: errors.agent_session_closed
+  protocol_version_unsupported:
+    http_status: 400
+    retryable: false
+    message_key: errors.protocol_version_unsupported
+  message_type_unknown:
+    http_status: 400
+    retryable: false
+    message_key: errors.message_type_unknown
+  message_schema_invalid:
+    http_status: 400
+    retryable: false
+    message_key: errors.message_schema_invalid
+  idempotency_key_required:
+    http_status: 400
+    retryable: false
+    message_key: errors.idempotency_key_required
+  client_instance_required:
+    http_status: 400
+    retryable: false
+    message_key: errors.client_instance_required

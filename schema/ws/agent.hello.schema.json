@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://gatepilot.local/schema/ws/agent.hello.schema.json",
+  "title": "agent.hello",
+  "allOf": [
+    { "$ref": "envelope.schema.json" },
+    {
+      "type": "object",
+      "properties": {
+        "type": { "const": "agent.hello" },
+        "payload": {
+          "type": "object",
+          "required": ["device_id", "agent_version", "protocol_version", "platform", "capabilities"],
+          "properties": {
+            "device_id": { "type": "string" },
+            "agent_version": { "type": "string" },
+            "protocol_version": { "type": "string" },
+            "platform": { "enum": ["windows", "macos", "linux"] },
+            "capabilities": { "type": "object" }
+          },
+          "additionalProperties": true
+        }
+      }
+    }
+  ]
+}

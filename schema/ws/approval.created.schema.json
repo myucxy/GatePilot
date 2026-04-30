@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://gatepilot.local/schema/ws/approval.created.schema.json",
+  "title": "approval.created",
+  "allOf": [
+    { "$ref": "envelope.schema.json" },
+    {
+      "type": "object",
+      "properties": {
+        "type": { "const": "approval.created" },
+        "payload": {
+          "type": "object",
+          "required": ["tenant_id", "approval_id", "risk_level", "event_type", "expires_at"],
+          "properties": {
+            "tenant_id": { "type": "string" },
+            "approval_id": { "type": "string" },
+            "risk_level": { "enum": ["low", "medium", "high", "critical"] },
+            "event_type": { "type": "string" },
+            "expires_at": { "type": "string", "format": "date-time" }
+          },
+          "additionalProperties": false
+        }
+      }
+    }
+  ]
+}

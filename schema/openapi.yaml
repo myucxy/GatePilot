@@ -1,0 +1,820 @@
+openapi: 3.0.3
+info:
+  title: GatePilot API
+  version: 2026-04-01
+servers:
+  - url: /api/v1
+paths:
+  /healthz:
+    get:
+      operationId: getHealth
+      summary: Service health check
+      security: []
+      responses:
+        "200":
+          description: Server is ready
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+  /me:
+    get:
+      operationId: getCurrentUser
+      summary: Get current user, tenants, roles, and permissions
+      responses:
+        "200":
+          description: Current user
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/CurrentUser"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+  /client-instances:
+    post:
+      operationId: registerClientInstance
+      summary: Register a Web, mobile, or Agent local UI client instance
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RegisterClientInstanceRequest"
+      responses:
+        "201":
+          description: Client instance registered
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required:
+                          - client_instance_id
+                        properties:
+                          client_instance_id:
+                            type: string
+                            format: uuid
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+  /tenants/{tenant_id}/device-activation-codes:
+    post:
+      operationId: createDeviceActivationCode
+      summary: Create a one-time device activation code
+      parameters:
+        - $ref: "#/components/parameters/TenantId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateDeviceActivationCodeRequest"
+      responses:
+        "201":
+          description: Activation code created
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/CreateDeviceActivationCodeResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          $ref: "#/components/responses/ErrorResponse"
+  /tenants/{tenant_id}/devices:
+    get:
+      operationId: listDevices
+      summary: List devices in a tenant
+      parameters:
+        - $ref: "#/components/parameters/TenantId"
+      responses:
+        "200":
+          description: Device list
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/DeviceListResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+  /agent/register:
+    post:
+      operationId: registerAgent
+      summary: Register an Agent with an activation code
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RegisterAgentRequest"
+      responses:
+        "201":
+          description: Agent registered
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/RegisterAgentResponse"
+        "422":
+          $ref: "#/components/responses/ErrorResponse"
+  /agent/sessions:
+    post:
+      operationId: createAgentSession
+      summary: Create a CLI session reported by Agent
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateAgentSessionRequest"
+      responses:
+        "201":
+          description: Session created
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/Session"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+  /agent/approvals:
+    post:
+      operationId: createAgentApproval
+      summary: Create an approval detected by Agent
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateAgentApprovalRequest"
+      responses:
+        "201":
+          description: Approval created
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/Approval"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+  /devices/{device_id}/sessions:
+    get:
+      operationId: listDeviceSessions
+      summary: List CLI sessions for a device
+      parameters:
+        - name: device_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Device sessions
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/SessionListResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+  /tenants/{tenant_id}/approvals:
+    get:
+      operationId: listApprovals
+      summary: List approvals in a tenant
+      parameters:
+        - $ref: "#/components/parameters/TenantId"
+        - name: status
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Approval list
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/ApprovalListResponse"
+  /approvals/{approval_id}/decision:
+    post:
+      operationId: submitApprovalDecision
+      summary: Submit a user approval decision
+      parameters:
+        - name: approval_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/ClientInstanceId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SubmitApprovalDecisionRequest"
+      responses:
+        "200":
+          description: Decision accepted or idempotent replay returned
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/SubmitApprovalDecisionResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  security:
+    - bearerAuth: []
+  parameters:
+    TenantId:
+      name: tenant_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      schema:
+        type: string
+    ClientInstanceId:
+      name: X-Client-Instance-Id
+      in: header
+      required: true
+      schema:
+        type: string
+        format: uuid
+  responses:
+    ErrorResponse:
+      description: Error response
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+  schemas:
+    SuccessEnvelope:
+      type: object
+      required:
+        - data
+        - request_id
+        - trace_id
+      properties:
+        data:
+          type: object
+        request_id:
+          type: string
+        trace_id:
+          type: string
+    ErrorEnvelope:
+      type: object
+      required:
+        - error
+        - request_id
+        - trace_id
+      properties:
+        error:
+          type: object
+          required:
+            - code
+            - message
+            - details
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+            details:
+              type: object
+        request_id:
+          type: string
+        trace_id:
+          type: string
+    HealthResponse:
+      type: object
+      required:
+        - data
+        - request_id
+        - trace_id
+      properties:
+        data:
+          type: object
+          required:
+            - status
+            - service
+            - version
+          properties:
+            status:
+              type: string
+              enum:
+                - ok
+            service:
+              type: string
+            version:
+              type: string
+        request_id:
+          type: string
+        trace_id:
+          type: string
+    CurrentUser:
+      type: object
+      required:
+        - user_id
+        - email
+        - display_name
+        - tenants
+      properties:
+        user_id:
+          type: string
+          format: uuid
+        email:
+          type: string
+        display_name:
+          type: string
+        tenants:
+          type: array
+          items:
+            type: object
+            required:
+              - tenant_id
+              - role
+              - permissions
+            properties:
+              tenant_id:
+                type: string
+                format: uuid
+              role:
+                type: string
+                enum:
+                  - owner
+                  - admin
+                  - approver
+                  - viewer
+              permissions:
+                type: array
+                items:
+                  type: string
+    RegisterClientInstanceRequest:
+      type: object
+      required:
+        - tenant_id
+        - client_type
+        - display_name
+        - app_version
+        - platform
+      properties:
+        tenant_id:
+          type: string
+          format: uuid
+        client_type:
+          type: string
+          enum:
+            - web
+            - mobile_ios
+            - mobile_android
+            - agent_desktop
+        display_name:
+          type: string
+        app_version:
+          type: string
+        platform:
+          type: string
+          enum:
+            - windows
+            - macos
+            - linux
+            - ios
+            - android
+            - browser
+    CreateDeviceActivationCodeRequest:
+      type: object
+      required:
+        - name
+        - expires_in_seconds
+      properties:
+        name:
+          type: string
+        expires_in_seconds:
+          type: integer
+          minimum: 60
+          maximum: 3600
+    CreateDeviceActivationCodeResponse:
+      type: object
+      required:
+        - activation_code
+        - expires_at
+      properties:
+        activation_code:
+          type: string
+        expires_at:
+          type: string
+          format: date-time
+    RegisterAgentRequest:
+      type: object
+      required:
+        - activation_code
+        - device_name
+        - platform
+        - arch
+        - agent_version
+        - protocol_version
+        - capabilities
+      properties:
+        activation_code:
+          type: string
+        device_name:
+          type: string
+        platform:
+          type: string
+          enum:
+            - windows
+            - macos
+            - linux
+        arch:
+          type: string
+          enum:
+            - amd64
+            - arm64
+        agent_version:
+          type: string
+        protocol_version:
+          type: string
+        capabilities:
+          type: object
+          additionalProperties: true
+    RegisterAgentResponse:
+      type: object
+      required:
+        - device_id
+        - device_token
+        - server_ws_url
+      properties:
+        device_id:
+          type: string
+          format: uuid
+        device_token:
+          type: string
+        server_ws_url:
+          type: string
+    Device:
+      type: object
+      required:
+        - device_id
+        - tenant_id
+        - name
+        - platform
+        - arch
+        - status
+        - last_seen_at
+        - created_at
+      properties:
+        device_id:
+          type: string
+        tenant_id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        platform:
+          type: string
+          enum:
+            - windows
+            - macos
+            - linux
+        arch:
+          type: string
+          enum:
+            - amd64
+            - arm64
+        status:
+          type: string
+          enum:
+            - active
+            - suspect_offline
+            - offline
+            - disabled
+        last_seen_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+    DeviceListResponse:
+      type: object
+      required:
+        - items
+        - next_cursor
+        - has_more
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Device"
+        next_cursor:
+          type: string
+          nullable: true
+        has_more:
+          type: boolean
+    SubmitApprovalDecisionRequest:
+      type: object
+      required:
+        - decision_type
+        - payload
+      properties:
+        decision_type:
+          type: string
+          enum:
+            - approve
+            - reject
+            - reply
+        payload:
+          type: string
+          nullable: true
+    CreateAgentSessionRequest:
+      type: object
+      required:
+        - device_id
+        - cli_type
+        - command_line_redacted
+        - working_dir_hash
+      properties:
+        device_id:
+          type: string
+        cli_type:
+          type: string
+          enum:
+            - codex
+            - claude_code
+            - opencode
+            - copilot
+            - gemini
+            - custom
+        command_line_redacted:
+          type: string
+        working_dir_hash:
+          type: string
+        last_output_summary:
+          type: string
+    Session:
+      type: object
+      required:
+        - session_id
+        - tenant_id
+        - device_id
+        - cli_type
+        - status
+        - started_at
+        - last_output_summary
+        - pending_approval_count
+      properties:
+        session_id:
+          type: string
+        tenant_id:
+          type: string
+          format: uuid
+        device_id:
+          type: string
+        cli_type:
+          type: string
+        status:
+          type: string
+          enum:
+            - starting
+            - running
+            - waiting_approval
+            - completed
+            - failed
+            - closed
+            - lost
+        started_at:
+          type: string
+          format: date-time
+        last_output_summary:
+          type: string
+        pending_approval_count:
+          type: integer
+    SessionListResponse:
+      type: object
+      required:
+        - items
+        - next_cursor
+        - has_more
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Session"
+        next_cursor:
+          type: string
+          nullable: true
+        has_more:
+          type: boolean
+    CreateAgentApprovalRequest:
+      type: object
+      required:
+        - device_id
+        - session_id
+        - cli_type
+        - event_type
+        - risk_level
+        - prompt_text
+        - context_before
+        - suggested_actions
+        - expires_in_seconds
+      properties:
+        device_id:
+          type: string
+        session_id:
+          type: string
+        cli_type:
+          type: string
+        event_type:
+          type: string
+        risk_level:
+          type: string
+        prompt_text:
+          type: string
+        context_before:
+          type: string
+        suggested_actions:
+          type: array
+          items:
+            type: string
+        expires_in_seconds:
+          type: integer
+    Approval:
+      type: object
+      required:
+        - approval_id
+        - tenant_id
+        - device_id
+        - session_id
+        - cli_type
+        - event_type
+        - risk_level
+        - prompt_text
+        - context_before
+        - status
+        - decision_type
+        - decision_payload
+        - decided_at
+        - created_at
+        - expires_at
+      properties:
+        approval_id:
+          type: string
+        tenant_id:
+          type: string
+        device_id:
+          type: string
+        session_id:
+          type: string
+        cli_type:
+          type: string
+        event_type:
+          type: string
+        risk_level:
+          type: string
+        prompt_text:
+          type: string
+        context_before:
+          type: string
+        status:
+          type: string
+        decision_type:
+          type: string
+        decision_payload:
+          type: string
+        decided_at:
+          type: string
+        created_at:
+          type: string
+        expires_at:
+          type: string
+    ApprovalListResponse:
+      type: object
+      required:
+        - items
+        - next_cursor
+        - has_more
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Approval"
+        next_cursor:
+          type: string
+          nullable: true
+        has_more:
+          type: boolean
+    SubmitApprovalDecisionResponse:
+      type: object
+      required:
+        - approval_id
+        - status
+        - decision_type
+        - delivery_status
+        - decided_by
+      properties:
+        approval_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum:
+            - delivering
+            - delivered
+            - delivery_failed
+        decision_type:
+          type: string
+          enum:
+            - approve
+            - reject
+            - reply
+        delivery_status:
+          type: string
+          enum:
+            - pending
+            - sent
+            - acked
+            - failed
+            - cancelled
+        decided_by:
+          type: object
+          required:
+            - actor_type
+            - actor_id
+            - display_name
+            - client_instance_id
+            - client_type
+          properties:
+            actor_type:
+              type: string
+              enum:
+                - user
+            actor_id:
+              type: string
+            display_name:
+              type: string
+            client_instance_id:
+              type: string
+              format: uuid
+            client_type:
+              type: string

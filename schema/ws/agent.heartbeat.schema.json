@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://gatepilot.local/schema/ws/agent.heartbeat.schema.json",
+  "title": "agent.heartbeat",
+  "allOf": [
+    { "$ref": "envelope.schema.json" },
+    {
+      "type": "object",
+      "properties": {
+        "type": { "const": "agent.heartbeat" },
+        "payload": {
+          "type": "object",
+          "required": ["active_sessions", "local_queue_depth", "last_error"],
+          "properties": {
+            "active_sessions": { "type": "integer", "minimum": 0 },
+            "local_queue_depth": { "type": "integer", "minimum": 0 },
+            "last_error": { "type": ["string", "null"] }
+          },
+          "additionalProperties": false
+        }
+      }
+    }
+  ]
+}

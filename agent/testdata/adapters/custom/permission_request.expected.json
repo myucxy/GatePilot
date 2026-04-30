@@ -1,0 +1,16 @@
+{
+  "snapshot": {
+    "text": "GatePilot fake AI CLI\npermission_request: allow command execution? [approve/reject/reply]\nwaiting_for_input"
+  },
+  "detected_event": {
+    "event_type": "permission_request",
+    "risk_level": "high",
+    "suggested_actions": ["approve", "reject", "reply"],
+    "default_timeout_action": "reject"
+  },
+  "writes": {
+    "approve": "approve\r",
+    "reject": "reject\r",
+    "reply": "<payload>\r"
+  }
+}
