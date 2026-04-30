@@ -5,6 +5,7 @@ DROP TABLE IF EXISTS approval_notifications;
 DROP TABLE IF EXISTS approval_deliveries;
 DROP TABLE IF EXISTS approval_requests;
 DROP TABLE IF EXISTS sessions;
+DROP TABLE IF EXISTS device_grants;
 DROP TABLE IF EXISTS device_tokens;
 DROP TABLE IF EXISTS client_instances;
 DROP TABLE IF EXISTS devices;

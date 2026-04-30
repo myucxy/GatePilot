@@ -2,6 +2,8 @@
 
 Minimal M0 Agent skeleton.
 
+Built-in adapter coverage now includes `custom`, `codex`, `claude_code`, `opencode`, `copilot`, and `gemini` prompt detection plus decision input mapping tests.
+
 ```powershell
 D:\Dev\Env\Go\bin\go.exe run .\cmd\agent version
 D:\Dev\Env\Go\bin\go.exe run .\cmd\agent register --activation-code <code>

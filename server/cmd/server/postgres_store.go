@@ -620,6 +620,81 @@ WHERE id = $2`, "approval "+nextStatus, req.SessionID)
 	return approvalAckData(item), nil
 }
 
+func (s *postgresStore) CreateDeviceGrant(deviceID string, req createDeviceGrantRequest, grantedBy string, now time.Time) (deviceGrant, *appError) {
+	if req.UserID == "" {
+		return deviceGrant{}, &appError{HTTPStatus: http.StatusBadRequest, Code: "message_schema_invalid", Message: "user_id is required"}
+	}
+	if req.Permission == "" {
+		req.Permission = "view"
+	}
+	switch req.Permission {
+	case "view", "approve", "admin":
+	default:
+		return deviceGrant{}, &appError{HTTPStatus: http.StatusBadRequest, Code: "message_schema_invalid", Message: "permission must be view, approve, or admin"}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return deviceGrant{}, internalStoreError(err)
+	}
+	defer tx.Rollback()
+
+	var tenantID string
+	err = tx.QueryRowContext(ctx, "SELECT tenant_id::text FROM devices WHERE id = $1", deviceID).Scan(&tenantID)
+	if err == sql.ErrNoRows {
+		return deviceGrant{}, &appError{HTTPStatus: http.StatusNotFound, Code: "device_offline", Message: "device not found"}
+	}
+	if err != nil {
+		return deviceGrant{}, internalStoreError(err)
+	}
+
+	item := deviceGrant{
+		GrantID:    randomUUID(),
+		TenantID:   tenantID,
+		DeviceID:   deviceID,
+		UserID:     req.UserID,
+		Permission: req.Permission,
+		GrantedBy:  grantedBy,
+		CreatedAt:  now.Format(time.RFC3339),
+	}
+	row := tx.QueryRowContext(ctx, `
+INSERT INTO device_grants(id, tenant_id, device_id, user_id, permission, granted_by_user_id, created_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
+ON CONFLICT (device_id, user_id, permission)
+WHERE revoked_at IS NULL
+DO UPDATE SET granted_by_user_id = EXCLUDED.granted_by_user_id
+RETURNING id::text, created_at`,
+		item.GrantID, item.TenantID, item.DeviceID, item.UserID, item.Permission, item.GrantedBy, now)
+	var createdAt time.Time
+	if err := row.Scan(&item.GrantID, &createdAt); err != nil {
+		return deviceGrant{}, internalStoreError(err)
+	}
+	item.CreatedAt = createdAt.Format(time.RFC3339)
+	if err := tx.Commit(); err != nil {
+		return deviceGrant{}, internalStoreError(err)
+	}
+	return item, nil
+}
+
+func (s *postgresStore) CanApproveDevice(tenantID string, deviceID string, userID string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var exists bool
+	err := s.db.QueryRowContext(ctx, `
+SELECT EXISTS (
+    SELECT 1
+    FROM device_grants
+    WHERE tenant_id = $1
+      AND device_id = $2
+      AND user_id = $3
+      AND permission IN ('approve', 'admin')
+      AND revoked_at IS NULL
+)`, tenantID, deviceID, userID).Scan(&exists)
+	return err == nil && exists
+}
+
 func (s *postgresStore) ListDeviceSessions(deviceID string) []session {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

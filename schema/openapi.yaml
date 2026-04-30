@@ -243,6 +243,38 @@ paths:
                         $ref: "#/components/schemas/SessionListResponse"
         "404":
           $ref: "#/components/responses/ErrorResponse"
+  /devices/{device_id}/grants:
+    post:
+      operationId: createDeviceGrant
+      summary: Grant a user access to a device
+      parameters:
+        - name: device_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateDeviceGrantRequest"
+      responses:
+        "201":
+          description: Device grant created
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/DeviceGrant"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
   /tenants/{tenant_id}/approvals:
     get:
       operationId: listApprovals
@@ -806,6 +838,56 @@ components:
           nullable: true
         has_more:
           type: boolean
+    CreateDeviceGrantRequest:
+      type: object
+      required:
+        - user_id
+        - permission
+      properties:
+        user_id:
+          type: string
+          format: uuid
+        permission:
+          type: string
+          enum:
+            - view
+            - approve
+            - admin
+    DeviceGrant:
+      type: object
+      required:
+        - grant_id
+        - tenant_id
+        - device_id
+        - user_id
+        - permission
+        - granted_by_user_id
+        - created_at
+      properties:
+        grant_id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          format: uuid
+        device_id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+          format: uuid
+        permission:
+          type: string
+          enum:
+            - view
+            - approve
+            - admin
+        granted_by_user_id:
+          type: string
+          format: uuid
+        created_at:
+          type: string
+          format: date-time
     SubmitApprovalDecisionResponse:
       type: object
       required:

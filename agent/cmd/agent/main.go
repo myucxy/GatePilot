@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/myucxy/gatepilot/agent/internal/adapter"
 )
 
 const (
@@ -82,9 +83,23 @@ func runManagedCLI(args []string) {
 			i = len(args)
 		}
 	}
+	cliType = adapter.NormalizeCLIType(cliType)
+	cliAdapter := adapter.ForCLI(cliType)
 
 	fmt.Println("GatePilot fake AI CLI")
 	fmt.Println("permission_request: allow command execution? [approve/reject/reply]")
+	detected := cliAdapter.Detect(adapter.TerminalSnapshot{
+		SessionID:   "",
+		SequenceNo:  1,
+		VisibleText: "GatePilot fake AI CLI\npermission_request: allow command execution? [approve/reject/reply]",
+		CursorLine:  "permission_request: allow command execution? [approve/reject/reply]",
+		RecentLines: []string{"GatePilot fake AI CLI", "permission_request: allow command execution? [approve/reject/reply]"},
+	})
+	if len(detected) == 0 {
+		fmt.Fprintln(os.Stderr, "managed CLI prompt was not detected")
+		os.Exit(1)
+	}
+	event := detected[0]
 
 	sessionBody := mustMarshal(map[string]any{
 		"device_id":             config.DeviceID,
@@ -100,18 +115,16 @@ func runManagedCLI(args []string) {
 	}
 	sessionID := responseDataString(sessionResp, "session_id")
 
-	promptText := "permission_request: allow command execution?"
-	contextBefore := "GatePilot fake AI CLI"
 	approvalBody := mustMarshal(map[string]any{
 		"device_id":          config.DeviceID,
 		"session_id":         sessionID,
 		"cli_type":           cliType,
-		"event_type":         "permission_request",
-		"risk_level":         "high",
-		"prompt_text":        promptText,
-		"context_before":     contextBefore,
-		"idempotency_key":    approvalIdempotencyKey(config.DeviceID, sessionID, cliType, promptText, contextBefore),
-		"suggested_actions":  []string{"approve", "reject", "reply"},
+		"event_type":         event.EventType,
+		"risk_level":         event.RiskLevel,
+		"prompt_text":        event.PromptText,
+		"context_before":     event.ContextBefore,
+		"idempotency_key":    approvalIdempotencyKey(config.DeviceID, sessionID, cliType, event.PromptText, event.ContextBefore),
+		"suggested_actions":  event.SuggestedActions,
 		"expires_in_seconds": 300,
 	})
 	approvalResp, err := postJSONWithToken(config.ServerURL+"/api/v1/agent/approvals", approvalBody, config.DeviceToken)
@@ -264,6 +277,14 @@ func waitForDelivery(conn *websocket.Conn, traceID string) {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
+		decisionInput, err := adapter.ForCLI("custom").BuildDecisionInput(adapter.ApprovalEvent{}, adapter.Decision{
+			Type:    delivery.DecisionType,
+			Payload: stringValue(delivery.Payload),
+		})
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
 
 		ackPayload := map[string]any{
 			"delivery_id": delivery.DeliveryID,
@@ -273,6 +294,7 @@ func waitForDelivery(conn *websocket.Conn, traceID string) {
 			"detail": map[string]any{
 				"source":        "agent-websocket",
 				"decision_type": delivery.DecisionType,
+				"bytes_written": len(decisionInput),
 			},
 		}
 		if err := conn.WriteJSON(newWSEnvelope("approval.decision.ack", traceID, ackPayload)); err != nil {
@@ -385,19 +407,34 @@ func detectApproval(args []string) {
 	}
 
 	serverURL := getenv("GATEPILOT_SERVER_URL", "http://127.0.0.1:8080")
-	cliType := "custom"
-	promptText := "permission_request: allow command execution?"
-	contextBefore := "GatePilot fake AI CLI"
+	cliType := adapter.NormalizeCLIType("custom")
+	cliAdapter := adapter.ForCLI(cliType)
+	detected := cliAdapter.Detect(adapter.TerminalSnapshot{
+		SessionID:   sessionID,
+		SequenceNo:  1,
+		VisibleText: "GatePilot fake AI CLI\npermission_request: allow command execution? [approve/reject/reply]\nwaiting_for_input",
+		CursorLine:  "waiting_for_input",
+		RecentLines: []string{
+			"GatePilot fake AI CLI",
+			"permission_request: allow command execution? [approve/reject/reply]",
+			"waiting_for_input",
+		},
+	})
+	if len(detected) == 0 {
+		fmt.Fprintln(os.Stderr, "fake approval prompt was not detected")
+		os.Exit(1)
+	}
+	event := detected[0]
 	payload := map[string]any{
 		"device_id":          deviceID,
 		"session_id":         sessionID,
 		"cli_type":           cliType,
-		"event_type":         "permission_request",
-		"risk_level":         "high",
-		"prompt_text":        promptText,
-		"context_before":     contextBefore,
-		"idempotency_key":    approvalIdempotencyKey(deviceID, sessionID, cliType, promptText, contextBefore),
-		"suggested_actions":  []string{"approve", "reject", "reply"},
+		"event_type":         event.EventType,
+		"risk_level":         event.RiskLevel,
+		"prompt_text":        event.PromptText,
+		"context_before":     event.ContextBefore,
+		"idempotency_key":    approvalIdempotencyKey(deviceID, sessionID, cliType, event.PromptText, event.ContextBefore),
+		"suggested_actions":  event.SuggestedActions,
 		"expires_in_seconds": 300,
 	}
 
@@ -687,6 +724,13 @@ func mustJSON(value any) string {
 		return "{}"
 	}
 	return string(body)
+}
+
+func stringValue(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
 }
 
 func getenv(key, fallback string) string {

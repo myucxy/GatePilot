@@ -60,6 +60,18 @@ CREATE TABLE IF NOT EXISTS device_tokens (
     revoked_at timestamptz
 );
 
+CREATE TABLE IF NOT EXISTS device_grants (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    device_id uuid NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+    user_id uuid NOT NULL,
+    permission varchar(32) NOT NULL,
+    granted_by_user_id uuid NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    expires_at timestamptz,
+    revoked_at timestamptz
+);
+
 CREATE TABLE IF NOT EXISTS sessions (
     id uuid PRIMARY KEY,
     tenant_id uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
@@ -171,6 +183,9 @@ CREATE TABLE IF NOT EXISTS http_idempotency_keys (
 CREATE INDEX IF NOT EXISTS idx_devices_tenant_status ON devices(tenant_id, status);
 CREATE INDEX IF NOT EXISTS idx_client_instances_tenant_user_status ON client_instances(tenant_id, user_id, status);
 CREATE INDEX IF NOT EXISTS idx_client_instances_device_status ON client_instances(device_id, status);
+CREATE INDEX IF NOT EXISTS idx_device_grants_tenant_user ON device_grants(tenant_id, user_id);
+CREATE INDEX IF NOT EXISTS idx_device_grants_device_revoked ON device_grants(device_id, revoked_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_device_grants_active_unique ON device_grants(device_id, user_id, permission) WHERE revoked_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_sessions_device_started ON sessions(device_id, started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_approvals_tenant_status_created ON approval_requests(tenant_id, status, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_approvals_session_created ON approval_requests(session_id, created_at DESC);

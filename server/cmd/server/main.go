@@ -103,6 +103,17 @@ type clientInstance struct {
 	CreatedAt        string `json:"created_at"`
 }
 
+type deviceGrant struct {
+	GrantID    string `json:"grant_id"`
+	TenantID   string `json:"tenant_id"`
+	DeviceID   string `json:"device_id"`
+	UserID     string `json:"user_id"`
+	Permission string `json:"permission"`
+	GrantedBy  string `json:"granted_by_user_id"`
+	CreatedAt  string `json:"created_at"`
+	RevokedAt  string `json:"revoked_at,omitempty"`
+}
+
 type createActivationCodeRequest struct {
 	Name             string `json:"name"`
 	ExpiresInSeconds int    `json:"expires_in_seconds"`
@@ -161,6 +172,11 @@ type registerClientInstanceRequest struct {
 	Platform    string `json:"platform"`
 }
 
+type createDeviceGrantRequest struct {
+	UserID     string `json:"user_id"`
+	Permission string `json:"permission"`
+}
+
 type appError struct {
 	HTTPStatus int
 	Code       string
@@ -178,6 +194,8 @@ type gatePilotStore interface {
 	ListApprovals(tenantID string, status string) []approval
 	SubmitApprovalDecision(approvalID string, req submitApprovalDecisionRequest, idempotencyKey string, decidedBy map[string]string, now time.Time) (approval, *appError)
 	AckApprovalDecision(req ackApprovalDecisionRequest) (map[string]any, *appError)
+	CreateDeviceGrant(deviceID string, req createDeviceGrantRequest, grantedBy string, now time.Time) (deviceGrant, *appError)
+	CanApproveDevice(tenantID string, deviceID string, userID string) bool
 	ListDeviceSessions(deviceID string) []session
 	MarkDeviceSeen(deviceID string, now time.Time) *appError
 	MarkClientInstanceSeen(clientInstanceID string, now time.Time) *appError
@@ -195,6 +213,7 @@ type memoryStore struct {
 	deviceTokenHashes        map[string]string
 	clientInstances          map[string]clientInstance
 	approvalNotifications    map[string][]string
+	deviceGrants             map[string]deviceGrant
 	devices                  map[string]device
 	sessions                 map[string]session
 	approvals                map[string]approval
@@ -211,6 +230,7 @@ func newMemoryStore() *memoryStore {
 		deviceTokenHashes:        map[string]string{},
 		clientInstances:          map[string]clientInstance{},
 		approvalNotifications:    map[string][]string{},
+		deviceGrants:             map[string]deviceGrant{},
 		devices:                  map[string]device{},
 		sessions:                 map[string]session{},
 		approvals:                map[string]approval{},
@@ -227,6 +247,7 @@ func (s *memoryStore) Reset() {
 	s.deviceTokenHashes = map[string]string{}
 	s.clientInstances = map[string]clientInstance{}
 	s.approvalNotifications = map[string][]string{}
+	s.deviceGrants = map[string]deviceGrant{}
 	s.devices = map[string]device{}
 	s.sessions = map[string]session{}
 	s.approvals = map[string]approval{}
@@ -561,6 +582,53 @@ func (s *memoryStore) AckApprovalDecision(req ackApprovalDecisionRequest) (map[s
 	return approvalAckData(item), nil
 }
 
+func (s *memoryStore) CreateDeviceGrant(deviceID string, req createDeviceGrantRequest, grantedBy string, now time.Time) (deviceGrant, *appError) {
+	if req.UserID == "" {
+		return deviceGrant{}, &appError{HTTPStatus: http.StatusBadRequest, Code: "message_schema_invalid", Message: "user_id is required"}
+	}
+	if req.Permission == "" {
+		req.Permission = "view"
+	}
+	switch req.Permission {
+	case "view", "approve", "admin":
+	default:
+		return deviceGrant{}, &appError{HTTPStatus: http.StatusBadRequest, Code: "message_schema_invalid", Message: "permission must be view, approve, or admin"}
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	deviceItem, ok := s.devices[deviceID]
+	if !ok {
+		return deviceGrant{}, &appError{HTTPStatus: http.StatusNotFound, Code: "device_offline", Message: "device not found"}
+	}
+	key := deviceID + ":" + req.UserID + ":" + req.Permission
+	if existing, ok := s.deviceGrants[key]; ok && existing.RevokedAt == "" {
+		return existing, nil
+	}
+	item := deviceGrant{
+		GrantID:    randomUUID(),
+		TenantID:   deviceItem.TenantID,
+		DeviceID:   deviceID,
+		UserID:     req.UserID,
+		Permission: req.Permission,
+		GrantedBy:  grantedBy,
+		CreatedAt:  now.Format(time.RFC3339),
+	}
+	s.deviceGrants[key] = item
+	return item, nil
+}
+
+func (s *memoryStore) CanApproveDevice(tenantID string, deviceID string, userID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, grant := range s.deviceGrants {
+		if grant.TenantID == tenantID && grant.DeviceID == deviceID && grant.UserID == userID && grant.RevokedAt == "" {
+			return grant.Permission == "approve" || grant.Permission == "admin"
+		}
+	}
+	return false
+}
+
 func (s *memoryStore) ListDeviceSessions(deviceID string) []session {
 	items := []session{}
 	s.mu.Lock()
@@ -745,6 +813,8 @@ func deviceScopedHandler(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case resource == "sessions" && r.Method == http.MethodGet:
 		listDeviceSessionsHandler(w, r, deviceID)
+	case resource == "grants" && r.Method == http.MethodPost:
+		createDeviceGrantHandler(w, r, deviceID)
 	default:
 		http.NotFound(w, r)
 	}
@@ -947,8 +1017,13 @@ func listApprovalsHandler(w http.ResponseWriter, r *http.Request, tenantID strin
 }
 
 func submitApprovalDecisionHandler(w http.ResponseWriter, r *http.Request, approvalID string) {
-	if !canSubmitApprovalDecision(r) {
-		writeError(w, r, http.StatusForbidden, "role_insufficient", "role cannot submit approval decisions")
+	item, appErr := store.GetApproval(approvalID)
+	if appErr != nil {
+		writeAppError(w, r, appErr)
+		return
+	}
+	if appErr := authorizeApprovalDecision(r, item); appErr != nil {
+		writeAppError(w, r, appErr)
 		return
 	}
 
@@ -964,7 +1039,7 @@ func submitApprovalDecisionHandler(w http.ResponseWriter, r *http.Request, appro
 		"client_instance_id": firstNonEmpty(r.Header.Get("X-Client-Instance-Id"), "00000000-0000-0000-0000-000000000200"),
 		"client_type":        "web",
 	}
-	item, appErr := store.SubmitApprovalDecision(approvalID, req, r.Header.Get("Idempotency-Key"), decidedBy, time.Now().UTC())
+	item, appErr = store.SubmitApprovalDecision(approvalID, req, r.Header.Get("Idempotency-Key"), decidedBy, time.Now().UTC())
 	if appErr != nil {
 		writeAppError(w, r, appErr)
 		return
@@ -983,13 +1058,40 @@ func devUserID(r *http.Request) string {
 	return firstNonEmpty(r.Header.Get("X-Dev-User-Id"), "00000000-0000-0000-0000-000000000001")
 }
 
-func canSubmitApprovalDecision(r *http.Request) bool {
+func authorizeApprovalDecision(r *http.Request, item approval) *appError {
 	switch devRole(r) {
-	case "owner", "admin", "approver":
-		return true
+	case "owner", "admin":
+		return nil
+	case "approver":
+		if store.CanApproveDevice(item.TenantID, item.DeviceID, devUserID(r)) {
+			return nil
+		}
+		return &appError{HTTPStatus: http.StatusForbidden, Code: "device_access_denied", Message: "approver does not have approve grant for this device"}
 	default:
-		return false
+		return &appError{HTTPStatus: http.StatusForbidden, Code: "role_insufficient", Message: "role cannot submit approval decisions"}
 	}
+}
+
+func createDeviceGrantHandler(w http.ResponseWriter, r *http.Request, deviceID string) {
+	if devRole(r) != "owner" && devRole(r) != "admin" {
+		writeError(w, r, http.StatusForbidden, "role_insufficient", "role cannot manage device grants")
+		return
+	}
+	var req createDeviceGrantRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, r, http.StatusBadRequest, "message_schema_invalid", err.Error())
+		return
+	}
+	item, appErr := store.CreateDeviceGrant(deviceID, req, devUserID(r), time.Now().UTC())
+	if appErr != nil {
+		writeAppError(w, r, appErr)
+		return
+	}
+	writeStatusJSON(w, http.StatusCreated, envelope{
+		Data:      item,
+		RequestID: requestID(r),
+		TraceID:   traceID(r),
+	})
 }
 
 func devRole(r *http.Request) string {

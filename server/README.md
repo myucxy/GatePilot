@@ -22,6 +22,7 @@ Endpoints:
 - `POST /api/v1/client-instances`
 - `POST /api/v1/tenants/{tenant_id}/device-activation-codes`
 - `GET /api/v1/tenants/{tenant_id}/devices`
+- `POST /api/v1/devices/{device_id}/grants`
 - `POST /api/v1/agent/register`
 - `POST /api/v1/agent/sessions`
 - `GET /api/v1/devices/{device_id}/sessions`

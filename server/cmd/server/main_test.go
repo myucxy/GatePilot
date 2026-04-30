@@ -181,6 +181,60 @@ func TestViewerCannotSubmitApprovalDecision(t *testing.T) {
 	}
 }
 
+func TestApproverRequiresDeviceGrant(t *testing.T) {
+	resetTestStore()
+	server := httptest.NewServer(newRouter())
+	defer server.Close()
+
+	code := createTestActivationCode(t, server.URL)
+	deviceID := registerTestDevice(t, server.URL, code)
+	sessionID := createTestSession(t, server.URL, deviceID)
+	approvalID := createTestApproval(t, server.URL, deviceID, sessionID)
+
+	body := postJSONWithHeaders(t, server.URL+"/api/v1/approvals/"+approvalID+"/decision", map[string]any{
+		"decision_type": "approve",
+		"payload":       "",
+	}, map[string]string{
+		"Idempotency-Key": randomUUID(),
+		"X-Dev-Role":      "approver",
+		"X-Dev-User-Id":   "00000000-0000-0000-0000-000000000099",
+	}, http.StatusForbidden)
+
+	errorBody, ok := body["error"].(map[string]any)
+	if !ok || errorBody["code"] != "device_access_denied" {
+		t.Fatalf("error code = %v, want device_access_denied", body)
+	}
+}
+
+func TestApproverCanSubmitApprovalDecisionWithDeviceGrant(t *testing.T) {
+	resetTestStore()
+	server := httptest.NewServer(newRouter())
+	defer server.Close()
+
+	code := createTestActivationCode(t, server.URL)
+	deviceID := registerTestDevice(t, server.URL, code)
+	sessionID := createTestSession(t, server.URL, deviceID)
+	approvalID := createTestApproval(t, server.URL, deviceID, sessionID)
+	approverID := "00000000-0000-0000-0000-000000000099"
+
+	postJSON(t, server.URL+"/api/v1/devices/"+deviceID+"/grants", map[string]any{
+		"user_id":    approverID,
+		"permission": "approve",
+	}, http.StatusCreated)
+
+	body := postJSONWithHeaders(t, server.URL+"/api/v1/approvals/"+approvalID+"/decision", map[string]any{
+		"decision_type": "approve",
+		"payload":       "",
+	}, map[string]string{
+		"Idempotency-Key": randomUUID(),
+		"X-Dev-Role":      "approver",
+		"X-Dev-User-Id":   approverID,
+	}, http.StatusOK)
+	if got := dataString(t, body, "status"); got != "delivering" {
+		t.Fatalf("approval status = %q, want delivering", got)
+	}
+}
+
 func TestApprovalDecisionIdempotencyReplaysFirstResult(t *testing.T) {
 	resetTestStore()
 	server := httptest.NewServer(newRouter())

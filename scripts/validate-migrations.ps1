@@ -23,6 +23,7 @@ $requiredTables = @(
     "devices",
     "client_instances",
     "device_tokens",
+    "device_grants",
     "sessions",
     "approval_requests",
     "approval_deliveries",
