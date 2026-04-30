@@ -318,7 +318,7 @@ components:
     IdempotencyKey:
       name: Idempotency-Key
       in: header
-      required: false
+      required: true
       schema:
         type: string
     ClientInstanceId:
@@ -702,6 +702,7 @@ components:
         - risk_level
         - prompt_text
         - context_before
+        - idempotency_key
         - suggested_actions
         - expires_in_seconds
       properties:
@@ -718,6 +719,8 @@ components:
         prompt_text:
           type: string
         context_before:
+          type: string
+        idempotency_key:
           type: string
         suggested_actions:
           type: array

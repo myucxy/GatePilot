@@ -105,6 +105,10 @@ errors:
     http_status: 400
     retryable: false
     message_key: errors.message_schema_invalid
+  internal_error:
+    http_status: 500
+    retryable: true
+    message_key: errors.internal_error
   idempotency_key_required:
     http_status: 400
     retryable: false

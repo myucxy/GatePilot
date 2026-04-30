@@ -81,6 +81,30 @@ p {
   white-space: nowrap;
 }
 
+.syncPill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid #b8c4d5;
+  background: #ffffff;
+  color: #334155;
+  border-radius: 999px;
+  padding: 6px 10px;
+  white-space: nowrap;
+}
+
+.syncPill.connected {
+  border-color: #16a34a;
+  color: #166534;
+  background: #eefbf1;
+}
+
+.syncPill.closed {
+  border-color: #dc2626;
+  color: #991b1b;
+  background: #fff1f1;
+}
+
 .topActions {
   display: flex;
   align-items: center;
@@ -157,6 +181,9 @@ p {
 }
 
 .toolActions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   border: 1px solid #b8c4d5;
   background: #ffffff;
   color: #1f2937;
@@ -167,6 +194,15 @@ p {
 
 .toolActions button:hover {
   background: #f1f5f9;
+}
+
+.toolActions button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.toolActions button:disabled:hover {
+  background: #ffffff;
 }
 
 .toolActions button.selectedAction {
@@ -193,6 +229,11 @@ p {
 .errorText {
   color: #b42318;
   margin-bottom: 12px;
+}
+
+.metaText {
+  font-size: 13px;
+  margin-top: 4px;
 }
 
 .deviceTable {

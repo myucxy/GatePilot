@@ -33,6 +33,23 @@ CREATE TABLE IF NOT EXISTS devices (
     updated_at timestamptz NOT NULL DEFAULT now()
 );
 
+CREATE TABLE IF NOT EXISTS client_instances (
+    id uuid PRIMARY KEY,
+    tenant_id uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    user_id uuid NOT NULL,
+    client_type varchar(32) NOT NULL,
+    device_id uuid REFERENCES devices(id) ON DELETE CASCADE,
+    display_name varchar(128) NOT NULL,
+    app_version varchar(64) NOT NULL,
+    platform varchar(64) NOT NULL,
+    push_token_ciphertext text NOT NULL DEFAULT '',
+    push_provider varchar(32) NOT NULL DEFAULT '',
+    status varchar(32) NOT NULL,
+    last_seen_at timestamptz NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS device_tokens (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     device_id uuid NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
@@ -62,6 +79,7 @@ CREATE TABLE IF NOT EXISTS approval_requests (
     tenant_id uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     device_id uuid NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
     session_id uuid NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    idempotency_key varchar(256) NOT NULL DEFAULT '',
     cli_type varchar(32) NOT NULL,
     event_type varchar(64) NOT NULL,
     risk_level varchar(32) NOT NULL,
@@ -96,11 +114,28 @@ CREATE TABLE IF NOT EXISTS approval_deliveries (
     updated_at timestamptz NOT NULL DEFAULT now()
 );
 
+CREATE TABLE IF NOT EXISTS approval_notifications (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    approval_id uuid NOT NULL REFERENCES approval_requests(id) ON DELETE CASCADE,
+    client_instance_id uuid NOT NULL REFERENCES client_instances(id) ON DELETE CASCADE,
+    user_id uuid NOT NULL,
+    client_type varchar(32) NOT NULL,
+    channel varchar(32) NOT NULL,
+    status varchar(32) NOT NULL,
+    sent_at timestamptz,
+    read_at timestamptz,
+    failed_at timestamptz,
+    error text NOT NULL DEFAULT '',
+    created_at timestamptz NOT NULL DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS approval_actions (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     approval_id uuid NOT NULL REFERENCES approval_requests(id) ON DELETE CASCADE,
     action_type varchar(32) NOT NULL,
+    idempotency_key varchar(256) NOT NULL DEFAULT '',
     actor_type varchar(32) NOT NULL,
     actor_id uuid,
     client_instance_id uuid,
@@ -124,11 +159,25 @@ CREATE TABLE IF NOT EXISTS audit_logs (
     created_at timestamptz NOT NULL DEFAULT now()
 );
 
+CREATE TABLE IF NOT EXISTS http_idempotency_keys (
+    scope varchar(256) NOT NULL,
+    idempotency_key varchar(256) NOT NULL,
+    request_signature varchar(512) NOT NULL,
+    response_json jsonb NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (scope, idempotency_key)
+);
+
 CREATE INDEX IF NOT EXISTS idx_devices_tenant_status ON devices(tenant_id, status);
+CREATE INDEX IF NOT EXISTS idx_client_instances_tenant_user_status ON client_instances(tenant_id, user_id, status);
+CREATE INDEX IF NOT EXISTS idx_client_instances_device_status ON client_instances(device_id, status);
 CREATE INDEX IF NOT EXISTS idx_sessions_device_started ON sessions(device_id, started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_approvals_tenant_status_created ON approval_requests(tenant_id, status, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_approvals_session_created ON approval_requests(session_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_approvals_waiting_expires ON approval_requests(expires_at) WHERE status = 'waiting_decision';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_approvals_tenant_idempotency ON approval_requests(tenant_id, idempotency_key) WHERE idempotency_key <> '';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_approval_actions_idempotency ON approval_actions(tenant_id, approval_id, idempotency_key) WHERE idempotency_key <> '';
 CREATE INDEX IF NOT EXISTS idx_deliveries_device_status_retry ON approval_deliveries(device_id, status, next_attempt_at);
 CREATE INDEX IF NOT EXISTS idx_deliveries_approval_created ON approval_deliveries(approval_id, created_at DESC);
-
+CREATE UNIQUE INDEX IF NOT EXISTS idx_notifications_approval_client ON approval_notifications(approval_id, client_instance_id);
+CREATE INDEX IF NOT EXISTS idx_notifications_tenant_user_created ON approval_notifications(tenant_id, user_id, created_at DESC);

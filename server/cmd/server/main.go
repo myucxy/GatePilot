@@ -29,6 +29,22 @@ type activationCode struct {
 	Consumed  bool
 }
 
+type activationCodeReplay struct {
+	Signature string
+	Code      string
+	ExpiresAt time.Time
+}
+
+type approvalDecisionReplay struct {
+	Signature string
+	Item      approval
+}
+
+type clientInstanceReplay struct {
+	Signature string
+	Item      clientInstance
+}
+
 type device struct {
 	DeviceID  string `json:"device_id"`
 	TenantID  string `json:"tenant_id"`
@@ -53,6 +69,7 @@ type session struct {
 
 type approval struct {
 	ApprovalID      string            `json:"approval_id"`
+	IdempotencyKey  string            `json:"-"`
 	TenantID        string            `json:"tenant_id"`
 	DeviceID        string            `json:"device_id"`
 	SessionID       string            `json:"session_id"`
@@ -70,6 +87,20 @@ type approval struct {
 	DecidedAt       string            `json:"decided_at"`
 	CreatedAt       string            `json:"created_at"`
 	ExpiresAt       string            `json:"expires_at"`
+}
+
+type clientInstance struct {
+	ClientInstanceID string `json:"client_instance_id"`
+	TenantID         string `json:"tenant_id"`
+	UserID           string `json:"user_id"`
+	ClientType       string `json:"client_type"`
+	DeviceID         string `json:"device_id,omitempty"`
+	DisplayName      string `json:"display_name"`
+	AppVersion       string `json:"app_version"`
+	Platform         string `json:"platform"`
+	Status           string `json:"status"`
+	LastSeenAt       string `json:"last_seen_at"`
+	CreatedAt        string `json:"created_at"`
 }
 
 type createActivationCodeRequest struct {
@@ -96,15 +127,16 @@ type createAgentSessionRequest struct {
 }
 
 type createAgentApprovalRequest struct {
-	DeviceID      string   `json:"device_id"`
-	SessionID     string   `json:"session_id"`
-	CLIType       string   `json:"cli_type"`
-	EventType     string   `json:"event_type"`
-	RiskLevel     string   `json:"risk_level"`
-	PromptText    string   `json:"prompt_text"`
-	ContextBefore string   `json:"context_before"`
-	Suggested     []string `json:"suggested_actions"`
-	ExpiresIn     int      `json:"expires_in_seconds"`
+	DeviceID       string   `json:"device_id"`
+	SessionID      string   `json:"session_id"`
+	CLIType        string   `json:"cli_type"`
+	EventType      string   `json:"event_type"`
+	RiskLevel      string   `json:"risk_level"`
+	PromptText     string   `json:"prompt_text"`
+	ContextBefore  string   `json:"context_before"`
+	IdempotencyKey string   `json:"idempotency_key"`
+	Suggested      []string `json:"suggested_actions"`
+	ExpiresIn      int      `json:"expires_in_seconds"`
 }
 
 type submitApprovalDecisionRequest struct {
@@ -120,6 +152,15 @@ type ackApprovalDecisionRequest struct {
 	Detail     map[string]any `json:"detail"`
 }
 
+type registerClientInstanceRequest struct {
+	TenantID    string `json:"tenant_id"`
+	ClientType  string `json:"client_type"`
+	DeviceID    string `json:"device_id"`
+	DisplayName string `json:"display_name"`
+	AppVersion  string `json:"app_version"`
+	Platform    string `json:"platform"`
+}
+
 type appError struct {
 	HTTPStatus int
 	Code       string
@@ -127,33 +168,52 @@ type appError struct {
 }
 
 type gatePilotStore interface {
-	CreateActivationCode(tenantID string, req createActivationCodeRequest, now time.Time) (string, time.Time)
+	RegisterClientInstance(req registerClientInstanceRequest, userID string, idempotencyKey string, now time.Time) (clientInstance, *appError)
+	CreateActivationCode(tenantID string, req createActivationCodeRequest, idempotencyKey string, now time.Time) (string, time.Time, *appError)
 	ListDevices(tenantID string) []device
 	RegisterAgent(req registerAgentRequest, now time.Time) (device, string, *appError)
 	CreateSession(req createAgentSessionRequest, now time.Time) (session, *appError)
 	CreateApproval(req createAgentApprovalRequest, now time.Time) (approval, *appError)
+	GetApproval(approvalID string) (approval, *appError)
 	ListApprovals(tenantID string, status string) []approval
-	SubmitApprovalDecision(approvalID string, req submitApprovalDecisionRequest, decidedBy map[string]string, now time.Time) (approval, *appError)
+	SubmitApprovalDecision(approvalID string, req submitApprovalDecisionRequest, idempotencyKey string, decidedBy map[string]string, now time.Time) (approval, *appError)
 	AckApprovalDecision(req ackApprovalDecisionRequest) (map[string]any, *appError)
 	ListDeviceSessions(deviceID string) []session
+	MarkDeviceSeen(deviceID string, now time.Time) *appError
+	MarkClientInstanceSeen(clientInstanceID string, now time.Time) *appError
+	ValidateDeviceToken(deviceID string, token string) *appError
+	ValidateApprovalDeviceToken(approvalID string, token string) *appError
+	ListPendingDeliveries(deviceID string) []approval
 }
 
 type memoryStore struct {
-	mu              sync.Mutex
-	activationCodes map[string]activationCode
-	devices         map[string]device
-	sessions        map[string]session
-	approvals       map[string]approval
+	mu                       sync.Mutex
+	activationCodes          map[string]activationCode
+	activationCodeReplayByID map[string]activationCodeReplay
+	clientInstanceReplay     map[string]clientInstanceReplay
+	approvalDecisionReplay   map[string]approvalDecisionReplay
+	deviceTokenHashes        map[string]string
+	clientInstances          map[string]clientInstance
+	approvalNotifications    map[string][]string
+	devices                  map[string]device
+	sessions                 map[string]session
+	approvals                map[string]approval
 }
 
 var store gatePilotStore = newMemoryStore()
 
 func newMemoryStore() *memoryStore {
 	return &memoryStore{
-		activationCodes: map[string]activationCode{},
-		devices:         map[string]device{},
-		sessions:        map[string]session{},
-		approvals:       map[string]approval{},
+		activationCodes:          map[string]activationCode{},
+		activationCodeReplayByID: map[string]activationCodeReplay{},
+		clientInstanceReplay:     map[string]clientInstanceReplay{},
+		approvalDecisionReplay:   map[string]approvalDecisionReplay{},
+		deviceTokenHashes:        map[string]string{},
+		clientInstances:          map[string]clientInstance{},
+		approvalNotifications:    map[string][]string{},
+		devices:                  map[string]device{},
+		sessions:                 map[string]session{},
+		approvals:                map[string]approval{},
 	}
 }
 
@@ -161,12 +221,69 @@ func (s *memoryStore) Reset() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.activationCodes = map[string]activationCode{}
+	s.activationCodeReplayByID = map[string]activationCodeReplay{}
+	s.clientInstanceReplay = map[string]clientInstanceReplay{}
+	s.approvalDecisionReplay = map[string]approvalDecisionReplay{}
+	s.deviceTokenHashes = map[string]string{}
+	s.clientInstances = map[string]clientInstance{}
+	s.approvalNotifications = map[string][]string{}
 	s.devices = map[string]device{}
 	s.sessions = map[string]session{}
 	s.approvals = map[string]approval{}
 }
 
-func (s *memoryStore) CreateActivationCode(tenantID string, req createActivationCodeRequest, now time.Time) (string, time.Time) {
+func (s *memoryStore) RegisterClientInstance(req registerClientInstanceRequest, userID string, idempotencyKey string, now time.Time) (clientInstance, *appError) {
+	if req.TenantID == "" {
+		return clientInstance{}, &appError{HTTPStatus: http.StatusBadRequest, Code: "message_schema_invalid", Message: "tenant_id is required"}
+	}
+	if req.ClientType == "" {
+		return clientInstance{}, &appError{HTTPStatus: http.StatusBadRequest, Code: "message_schema_invalid", Message: "client_type is required"}
+	}
+	if req.DisplayName == "" {
+		req.DisplayName = req.ClientType
+	}
+	if req.AppVersion == "" {
+		req.AppVersion = version
+	}
+	if req.Platform == "" {
+		req.Platform = "browser"
+	}
+	if idempotencyKey == "" {
+		return clientInstance{}, &appError{HTTPStatus: http.StatusBadRequest, Code: "idempotency_key_required", Message: "Idempotency-Key header is required"}
+	}
+
+	replayKey := req.TenantID + ":" + userID + ":" + idempotencyKey
+	signature := fmt.Sprintf("%s:%s:%s:%s:%s:%s", req.TenantID, req.ClientType, req.DeviceID, req.DisplayName, req.AppVersion, req.Platform)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if replay, ok := s.clientInstanceReplay[replayKey]; ok {
+		if replay.Signature != signature {
+			return clientInstance{}, &appError{HTTPStatus: http.StatusConflict, Code: "approval_decision_conflict", Message: "idempotency key reused with different parameters"}
+		}
+		return replay.Item, nil
+	}
+
+	nowString := now.Format(time.RFC3339)
+	item := clientInstance{
+		ClientInstanceID: randomUUID(),
+		TenantID:         req.TenantID,
+		UserID:           userID,
+		ClientType:       req.ClientType,
+		DeviceID:         req.DeviceID,
+		DisplayName:      req.DisplayName,
+		AppVersion:       req.AppVersion,
+		Platform:         req.Platform,
+		Status:           "active",
+		LastSeenAt:       nowString,
+		CreatedAt:        nowString,
+	}
+	s.clientInstances[item.ClientInstanceID] = item
+	s.clientInstanceReplay[replayKey] = clientInstanceReplay{Signature: signature, Item: item}
+	return item, nil
+}
+
+func (s *memoryStore) CreateActivationCode(tenantID string, req createActivationCodeRequest, idempotencyKey string, now time.Time) (string, time.Time, *appError) {
 	if req.Name == "" {
 		req.Name = "New Device"
 	}
@@ -174,18 +291,37 @@ func (s *memoryStore) CreateActivationCode(tenantID string, req createActivation
 		req.ExpiresInSeconds = 600
 	}
 
-	code := "GP-" + randomHex(3) + "-" + randomHex(3)
-	expiresAt := now.Add(time.Duration(req.ExpiresInSeconds) * time.Second)
+	if idempotencyKey == "" {
+		return "", time.Time{}, &appError{HTTPStatus: http.StatusBadRequest, Code: "idempotency_key_required", Message: "Idempotency-Key header is required"}
+	}
+
+	replayKey := tenantID + ":" + idempotencyKey
+	signature := fmt.Sprintf("%s:%d", req.Name, req.ExpiresInSeconds)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if replay, ok := s.activationCodeReplayByID[replayKey]; ok {
+		if replay.Signature != signature {
+			return "", time.Time{}, &appError{HTTPStatus: http.StatusConflict, Code: "approval_decision_conflict", Message: "idempotency key reused with different parameters"}
+		}
+		return replay.Code, replay.ExpiresAt, nil
+	}
+
+	code := "GP-" + randomHex(3) + "-" + randomHex(3)
+	expiresAt := now.Add(time.Duration(req.ExpiresInSeconds) * time.Second)
+
 	s.activationCodes[code] = activationCode{
 		TenantID:  tenantID,
 		Name:      req.Name,
 		Code:      code,
 		ExpiresAt: expiresAt,
 	}
-	return code, expiresAt
+	s.activationCodeReplayByID[replayKey] = activationCodeReplay{
+		Signature: signature,
+		Code:      code,
+		ExpiresAt: expiresAt,
+	}
+	return code, expiresAt, nil
 }
 
 func (s *memoryStore) ListDevices(tenantID string) []device {
@@ -223,6 +359,7 @@ func (s *memoryStore) RegisterAgent(req registerAgentRequest, now time.Time) (de
 		CreatedAt: created,
 	}
 	s.devices[deviceID] = item
+	s.deviceTokenHashes[deviceID] = sha256Hex(deviceToken)
 	code.Consumed = true
 	s.activationCodes[req.ActivationCode] = code
 	return item, deviceToken, nil
@@ -272,10 +409,18 @@ func (s *memoryStore) CreateApproval(req createAgentApprovalRequest, now time.Ti
 	if !ok || sessionItem.DeviceID != req.DeviceID {
 		return approval{}, &appError{HTTPStatus: http.StatusNotFound, Code: "agent_session_not_found", Message: "session not found"}
 	}
+	if req.IdempotencyKey != "" {
+		for _, existing := range s.approvals {
+			if existing.TenantID == sessionItem.TenantID && existing.IdempotencyKey == req.IdempotencyKey {
+				return existing, nil
+			}
+		}
+	}
 
 	approvalID := randomUUID()
 	item := approval{
 		ApprovalID:     approvalID,
+		IdempotencyKey: req.IdempotencyKey,
 		TenantID:       sessionItem.TenantID,
 		DeviceID:       req.DeviceID,
 		SessionID:      req.SessionID,
@@ -290,9 +435,24 @@ func (s *memoryStore) CreateApproval(req createAgentApprovalRequest, now time.Ti
 		ExpiresAt:      now.Add(time.Duration(req.ExpiresIn) * time.Second).Format(time.RFC3339),
 	}
 	s.approvals[approvalID] = item
+	for _, client := range s.clientInstances {
+		if client.TenantID == sessionItem.TenantID && client.Status == "active" {
+			s.approvalNotifications[approvalID] = append(s.approvalNotifications[approvalID], client.ClientInstanceID)
+		}
+	}
 	sessionItem.Status = "waiting_approval"
 	sessionItem.PendingApprovals++
 	s.sessions[req.SessionID] = sessionItem
+	return item, nil
+}
+
+func (s *memoryStore) GetApproval(approvalID string) (approval, *appError) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	item, ok := s.approvals[approvalID]
+	if !ok {
+		return approval{}, &appError{HTTPStatus: http.StatusNotFound, Code: "approval_not_found", Message: "approval not found"}
+	}
 	return item, nil
 }
 
@@ -312,13 +472,26 @@ func (s *memoryStore) ListApprovals(tenantID string, status string) []approval {
 	return items
 }
 
-func (s *memoryStore) SubmitApprovalDecision(approvalID string, req submitApprovalDecisionRequest, decidedBy map[string]string, now time.Time) (approval, *appError) {
+func (s *memoryStore) SubmitApprovalDecision(approvalID string, req submitApprovalDecisionRequest, idempotencyKey string, decidedBy map[string]string, now time.Time) (approval, *appError) {
 	if req.DecisionType == "" {
 		req.DecisionType = "approve"
+	}
+	if idempotencyKey == "" {
+		return approval{}, &appError{HTTPStatus: http.StatusBadRequest, Code: "idempotency_key_required", Message: "Idempotency-Key header is required"}
 	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	replayKey := approvalID + ":" + idempotencyKey
+	signature := req.DecisionType + ":" + req.Payload
+	if replay, ok := s.approvalDecisionReplay[replayKey]; ok {
+		if replay.Signature != signature {
+			return approval{}, &appError{HTTPStatus: http.StatusConflict, Code: "approval_decision_conflict", Message: "Idempotency-Key reused with different decision parameters"}
+		}
+		return replay.Item, nil
+	}
+
 	item, ok := s.approvals[approvalID]
 	if !ok {
 		return approval{}, &appError{HTTPStatus: http.StatusNotFound, Code: "approval_not_found", Message: "approval not found"}
@@ -336,6 +509,10 @@ func (s *memoryStore) SubmitApprovalDecision(approvalID string, req submitApprov
 	item.DecidedBy = decidedBy
 	item.DecidedAt = now.Format(time.RFC3339)
 	s.approvals[approvalID] = item
+	s.approvalDecisionReplay[replayKey] = approvalDecisionReplay{
+		Signature: signature,
+		Item:      item,
+	}
 
 	if sessionItem, ok := s.sessions[item.SessionID]; ok {
 		sessionItem.Status = "waiting_approval"
@@ -396,6 +573,67 @@ func (s *memoryStore) ListDeviceSessions(deviceID string) []session {
 	return items
 }
 
+func (s *memoryStore) MarkDeviceSeen(deviceID string, now time.Time) *appError {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	item, ok := s.devices[deviceID]
+	if !ok {
+		return &appError{HTTPStatus: http.StatusNotFound, Code: "device_offline", Message: "device not found"}
+	}
+	item.Status = "active"
+	item.LastSeen = now.Format(time.RFC3339)
+	s.devices[deviceID] = item
+	return nil
+}
+
+func (s *memoryStore) MarkClientInstanceSeen(clientInstanceID string, now time.Time) *appError {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	item, ok := s.clientInstances[clientInstanceID]
+	if !ok {
+		return &appError{HTTPStatus: http.StatusNotFound, Code: "client_instance_not_found", Message: "client instance not found"}
+	}
+	item.Status = "active"
+	item.LastSeenAt = now.Format(time.RFC3339)
+	s.clientInstances[clientInstanceID] = item
+	return nil
+}
+
+func (s *memoryStore) ValidateDeviceToken(deviceID string, token string) *appError {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if token == "" {
+		return &appError{HTTPStatus: http.StatusUnauthorized, Code: "device_token_invalid", Message: "device token is invalid"}
+	}
+	tokenHash, ok := s.deviceTokenHashes[deviceID]
+	if !ok || tokenHash != sha256Hex(token) {
+		return &appError{HTTPStatus: http.StatusUnauthorized, Code: "device_token_invalid", Message: "device token is invalid"}
+	}
+	return nil
+}
+
+func (s *memoryStore) ValidateApprovalDeviceToken(approvalID string, token string) *appError {
+	s.mu.Lock()
+	item, ok := s.approvals[approvalID]
+	s.mu.Unlock()
+	if !ok {
+		return &appError{HTTPStatus: http.StatusNotFound, Code: "approval_not_found", Message: "approval not found"}
+	}
+	return s.ValidateDeviceToken(item.DeviceID, token)
+}
+
+func (s *memoryStore) ListPendingDeliveries(deviceID string) []approval {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	items := []approval{}
+	for _, item := range s.approvals {
+		if item.DeviceID == deviceID && item.Status == "delivering" && item.DeliveryStatus == "sent" {
+			items = append(items, item)
+		}
+	}
+	return items
+}
+
 func approvalAckData(item approval) map[string]any {
 	return map[string]any{
 		"approval_id":     item.ApprovalID,
@@ -407,6 +645,9 @@ func approvalAckData(item approval) map[string]any {
 
 func main() {
 	addr := getenv("GATEPILOT_SERVER_ADDR", ":8080")
+	if err := configureStore(); err != nil {
+		log.Fatal(err)
+	}
 
 	// M0 阶段先暴露健康检查和当前用户接口，后续模块按 docs/03-detailed-design.md 拆入 domain service。
 	log.Printf("gatepilot server listening on %s", addr)
@@ -415,11 +656,28 @@ func main() {
 	}
 }
 
+func configureStore() error {
+	if getenv("GATEPILOT_STORE", "memory") != "postgres" {
+		return nil
+	}
+	databaseURL := firstNonEmpty(os.Getenv("GATEPILOT_DATABASE_URL"), os.Getenv("DATABASE_URL"))
+	if databaseURL == "" {
+		return fmt.Errorf("GATEPILOT_STORE=postgres requires GATEPILOT_DATABASE_URL or DATABASE_URL")
+	}
+	postgresStore, err := newPostgresStore(databaseURL)
+	if err != nil {
+		return err
+	}
+	store = postgresStore
+	return nil
+}
+
 func newRouter() http.Handler {
 	// 路由集中在这里，测试可以直接复用同一套 HTTP 行为，避免脚本和单测走出不同契约。
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/healthz", healthHandler)
 	mux.HandleFunc("/api/v1/me", meHandler)
+	mux.HandleFunc("/api/v1/client-instances", clientInstancesHandler)
 	mux.HandleFunc("/api/v1/agent/register", agentRegisterHandler)
 	mux.HandleFunc("/api/v1/agent/sessions", agentSessionsHandler)
 	mux.HandleFunc("/api/v1/agent/approvals", agentApprovalsHandler)
@@ -427,8 +685,35 @@ func newRouter() http.Handler {
 	mux.HandleFunc("/api/v1/approvals/", approvalScopedHandler)
 	mux.HandleFunc("/api/v1/devices/", deviceScopedHandler)
 	mux.HandleFunc("/api/v1/tenants/", tenantScopedHandler)
+	mux.HandleFunc("/ws/agent", agentWebSocketHandler)
+	mux.HandleFunc("/ws/client", clientWebSocketHandler)
 
 	return requestLog(cors(mux))
+}
+
+func clientInstancesHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req registerClientInstanceRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, r, http.StatusBadRequest, "message_schema_invalid", err.Error())
+		return
+	}
+	item, appErr := store.RegisterClientInstance(req, devUserID(r), r.Header.Get("Idempotency-Key"), time.Now().UTC())
+	if appErr != nil {
+		writeAppError(w, r, appErr)
+		return
+	}
+	writeStatusJSON(w, http.StatusCreated, envelope{
+		Data: map[string]string{
+			"client_instance_id": item.ClientInstanceID,
+		},
+		RequestID: requestID(r),
+		TraceID:   traceID(r),
+	})
 }
 
 func approvalScopedHandler(w http.ResponseWriter, r *http.Request) {
@@ -497,8 +782,8 @@ func meHandler(w http.ResponseWriter, r *http.Request) {
 			"tenants": []map[string]any{
 				{
 					"tenant_id":   "00000000-0000-0000-0000-000000000100",
-					"role":        "owner",
-					"permissions": []string{"tenant:admin", "device:admin", "approval:approve"},
+					"role":        devRole(r),
+					"permissions": devPermissions(r),
 				},
 			},
 		},
@@ -534,7 +819,11 @@ func createActivationCodeHandler(w http.ResponseWriter, r *http.Request, tenantI
 		writeError(w, r, http.StatusBadRequest, "message_schema_invalid", err.Error())
 		return
 	}
-	code, expiresAt := store.CreateActivationCode(tenantID, req, time.Now().UTC())
+	code, expiresAt, appErr := store.CreateActivationCode(tenantID, req, r.Header.Get("Idempotency-Key"), time.Now().UTC())
+	if appErr != nil {
+		writeAppError(w, r, appErr)
+		return
+	}
 
 	writeStatusJSON(w, http.StatusCreated, envelope{
 		Data: map[string]any{
@@ -597,6 +886,10 @@ func agentSessionsHandler(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusBadRequest, "message_schema_invalid", err.Error())
 		return
 	}
+	if appErr := store.ValidateDeviceToken(req.DeviceID, bearerToken(r)); appErr != nil {
+		writeAppError(w, r, appErr)
+		return
+	}
 	item, appErr := store.CreateSession(req, time.Now().UTC())
 	if appErr != nil {
 		writeAppError(w, r, appErr)
@@ -621,11 +914,16 @@ func agentApprovalsHandler(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusBadRequest, "message_schema_invalid", err.Error())
 		return
 	}
+	if appErr := store.ValidateDeviceToken(req.DeviceID, bearerToken(r)); appErr != nil {
+		writeAppError(w, r, appErr)
+		return
+	}
 	item, appErr := store.CreateApproval(req, time.Now().UTC())
 	if appErr != nil {
 		writeAppError(w, r, appErr)
 		return
 	}
+	pushApprovalCreatedToClients(item)
 
 	writeStatusJSON(w, http.StatusCreated, envelope{
 		Data:      item,
@@ -649,6 +947,11 @@ func listApprovalsHandler(w http.ResponseWriter, r *http.Request, tenantID strin
 }
 
 func submitApprovalDecisionHandler(w http.ResponseWriter, r *http.Request, approvalID string) {
+	if !canSubmitApprovalDecision(r) {
+		writeError(w, r, http.StatusForbidden, "role_insufficient", "role cannot submit approval decisions")
+		return
+	}
+
 	var req submitApprovalDecisionRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, r, http.StatusBadRequest, "message_schema_invalid", err.Error())
@@ -661,17 +964,53 @@ func submitApprovalDecisionHandler(w http.ResponseWriter, r *http.Request, appro
 		"client_instance_id": firstNonEmpty(r.Header.Get("X-Client-Instance-Id"), "00000000-0000-0000-0000-000000000200"),
 		"client_type":        "web",
 	}
-	item, appErr := store.SubmitApprovalDecision(approvalID, req, decidedBy, time.Now().UTC())
+	item, appErr := store.SubmitApprovalDecision(approvalID, req, r.Header.Get("Idempotency-Key"), decidedBy, time.Now().UTC())
 	if appErr != nil {
 		writeAppError(w, r, appErr)
 		return
 	}
+	pushApprovalDecisionToAgent(item)
+	pushApprovalUpdatedToClients(item)
 
 	writeJSON(w, envelope{
 		Data:      item,
 		RequestID: requestID(r),
 		TraceID:   traceID(r),
 	})
+}
+
+func devUserID(r *http.Request) string {
+	return firstNonEmpty(r.Header.Get("X-Dev-User-Id"), "00000000-0000-0000-0000-000000000001")
+}
+
+func canSubmitApprovalDecision(r *http.Request) bool {
+	switch devRole(r) {
+	case "owner", "admin", "approver":
+		return true
+	default:
+		return false
+	}
+}
+
+func devRole(r *http.Request) string {
+	role := r.Header.Get("X-Dev-Role")
+	switch role {
+	case "owner", "admin", "approver", "viewer":
+		return role
+	default:
+		return "owner"
+	}
+}
+
+func devPermissions(r *http.Request) []string {
+	switch devRole(r) {
+	case "owner", "admin":
+		return []string{"tenant:admin", "device:admin", "approval:approve"}
+	case "approver":
+		return []string{"approval:approve"}
+	default:
+		return []string{"approval:read"}
+	}
 }
 
 func agentApprovalAcksHandler(w http.ResponseWriter, r *http.Request) {
@@ -685,10 +1024,17 @@ func agentApprovalAcksHandler(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusBadRequest, "message_schema_invalid", err.Error())
 		return
 	}
+	if appErr := store.ValidateApprovalDeviceToken(req.ApprovalID, bearerToken(r)); appErr != nil {
+		writeAppError(w, r, appErr)
+		return
+	}
 	data, appErr := store.AckApprovalDecision(req)
 	if appErr != nil {
 		writeAppError(w, r, appErr)
 		return
+	}
+	if item, appErr := store.GetApproval(req.ApprovalID); appErr == nil {
+		pushApprovalUpdatedToClients(item)
 	}
 
 	writeJSON(w, envelope{
@@ -749,7 +1095,7 @@ func requestLog(next http.Handler) http.Handler {
 func cors(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, Idempotency-Key, X-Request-Id, X-Client-Instance-Id")
+		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, Idempotency-Key, X-Request-Id, X-Client-Instance-Id, X-Dev-Role, X-Dev-User-Id")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
@@ -771,6 +1117,14 @@ func traceID(r *http.Request) string {
 		return v
 	}
 	return "tr_local"
+}
+
+func bearerToken(r *http.Request) string {
+	value := r.Header.Get("Authorization")
+	if strings.HasPrefix(value, "Bearer ") {
+		return strings.TrimPrefix(value, "Bearer ")
+	}
+	return ""
 }
 
 func getenv(key, fallback string) string {

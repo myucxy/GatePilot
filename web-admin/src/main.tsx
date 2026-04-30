@@ -1,21 +1,23 @@
-import React, { useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { Activity, CheckCircle2, Laptop, Smartphone } from "lucide-react";
+import { Activity, CheckCircle2, Laptop, Radio, RefreshCw, Smartphone } from "lucide-react";
 import "./styles.css";
 
 type Language = "zh" | "en";
 type ApprovalFilter = "all" | "pending" | "completed";
+type WSState = "idle" | "connecting" | "connected" | "closed";
 
 const tenantId = "00000000-0000-0000-0000-000000000100";
+const clientInstanceKeyStorage = "gatepilot.web.clientInstanceKey";
 
 const copy = {
   zh: {
     nav: ["总览", "审批", "设备", "会话"],
     title: "开发控制台",
-    subtitle: "契约优先的 M0 工作台，用于 Server、Agent、Web、Mobile 并行开发。",
-    schema: "契约 2026-04-01",
+    subtitle: "用于设备绑定、会话查看、审批处理和多端同步联调。",
+    schema: "协议 2026-04-01",
     language: "语言",
-    createCode: "生成设备激活码",
+    createCode: "生成激活码",
     refreshDevices: "刷新设备",
     refreshSessions: "刷新会话",
     refreshApprovals: "刷新审批",
@@ -24,29 +26,34 @@ const copy = {
     reply: "回复",
     activationCode: "激活码",
     noDevices: "暂无设备",
-    noSessions: "请选择设备并刷新会话",
+    noSessions: "选择设备后刷新会话",
     noApprovals: "暂无审批",
     deviceList: "设备列表",
     sessionList: "会话列表",
     approvalList: "审批列表",
+    sync: "实时同步",
+    client: "客户端实例",
+    submitting: "提交中",
     filters: {
       all: "全部",
       pending: "待处理",
       completed: "已完成"
     },
     requestFailed: "请求失败",
+    roleInsufficient: "当前角色没有审批权限",
+    alreadyDecided: "该审批已被处理，请刷新列表",
     lanes: [
-      { title: "服务端", status: "M0 骨架", icon: Activity },
-      { title: "Agent", status: "版本命令 + fake CLI", icon: Laptop },
-      { title: "Web", status: "管理端壳应用", icon: CheckCircle2 },
-      { title: "移动端", status: "Android 9+ 目标", icon: Smartphone }
+      { title: "服务端", status: "设备、会话、审批与多端同步", icon: Activity },
+      { title: "Agent", status: "注册、长连接、fake CLI 托管", icon: Laptop },
+      { title: "Web", status: "审批工作台和实时刷新", icon: CheckCircle2 },
+      { title: "移动端", status: "Android 9+ 目标壳应用", icon: Smartphone }
     ]
   },
   en: {
     nav: ["Overview", "Approvals", "Devices", "Sessions"],
     title: "Development Console",
-    subtitle: "Contract-first M0 workspace for parallel Server, Agent, Web, and Mobile development.",
-    schema: "schema 2026-04-01",
+    subtitle: "Device binding, session viewing, approval handling, and multi-client sync.",
+    schema: "protocol 2026-04-01",
     language: "Language",
     createCode: "Create activation code",
     refreshDevices: "Refresh devices",
@@ -62,17 +69,22 @@ const copy = {
     deviceList: "Devices",
     sessionList: "Sessions",
     approvalList: "Approvals",
+    sync: "Live sync",
+    client: "Client instance",
+    submitting: "Submitting",
     filters: {
       all: "All",
       pending: "Pending",
       completed: "Completed"
     },
     requestFailed: "Request failed",
+    roleInsufficient: "Current role cannot submit approval decisions",
+    alreadyDecided: "This approval was already decided. Refresh the list.",
     lanes: [
-      { title: "Server", status: "M0 skeleton", icon: Activity },
-      { title: "Agent", status: "version + fake CLI", icon: Laptop },
-      { title: "Web", status: "admin shell", icon: CheckCircle2 },
-      { title: "Mobile", status: "Android 9+ target", icon: Smartphone }
+      { title: "Server", status: "devices, sessions, approvals, sync", icon: Activity },
+      { title: "Agent", status: "registration, websocket, fake CLI host", icon: Laptop },
+      { title: "Web", status: "approval workspace and live refresh", icon: CheckCircle2 },
+      { title: "Mobile", status: "Android 9+ shell", icon: Smartphone }
     ]
   }
 };
@@ -110,7 +122,6 @@ type Approval = {
   expires_at: string;
 };
 
-// 当前页面是并行开发工作台，占位数据只表达各端开工状态；真实数据接入由 schema 生成的 API client 完成。
 function App() {
   const [language, setLanguage] = useState<Language>("zh");
   const [activationCode, setActivationCode] = useState<string>("");
@@ -119,8 +130,80 @@ function App() {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [approvals, setApprovals] = useState<Approval[]>([]);
   const [approvalFilter, setApprovalFilter] = useState<ApprovalFilter>("pending");
+  const [clientInstanceID, setClientInstanceID] = useState<string>("");
+  const [wsState, setWSState] = useState<WSState>("idle");
+  const [submittingApprovals, setSubmittingApprovals] = useState<Set<string>>(new Set());
   const [error, setError] = useState<string>("");
+  const selectedDeviceRef = useRef("");
+  const approvalFilterRef = useRef<ApprovalFilter>("pending");
   const text = copy[language];
+
+  useEffect(() => {
+    selectedDeviceRef.current = selectedDeviceID;
+  }, [selectedDeviceID]);
+
+  useEffect(() => {
+    approvalFilterRef.current = approvalFilter;
+  }, [approvalFilter]);
+
+  useEffect(() => {
+    registerClientInstance().then((id) => {
+      if (id) {
+        setClientInstanceID(id);
+        connectClientWebSocket(id);
+      }
+    });
+    refreshDevices();
+    refreshApprovals("pending");
+  }, []);
+
+  async function registerClientInstance() {
+    setError("");
+    const idempotencyKey = getOrCreateClientInstanceKey();
+    const response = await fetch("/api/v1/client-instances", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Idempotency-Key": idempotencyKey
+      },
+      body: JSON.stringify({
+        tenant_id: tenantId,
+        client_type: "web",
+        display_name: browserDisplayName(),
+        app_version: "0.1.0",
+        platform: "browser"
+      })
+    });
+    if (!response.ok) {
+      setError(await responseErrorMessage(response, text));
+      return "";
+    }
+    const body = await response.json();
+    return body.data.client_instance_id as string;
+  }
+
+  function connectClientWebSocket(instanceID: string) {
+    setWSState("connecting");
+    const url = new URL("/ws/client", window.location.href);
+    url.protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    url.searchParams.set("tenant_id", tenantId);
+    url.searchParams.set("client_instance_id", instanceID);
+
+    const socket = new WebSocket(url);
+    socket.onmessage = (event) => {
+      const message = JSON.parse(event.data);
+      if (message.type === "client.connected") {
+        setWSState("connected");
+        return;
+      }
+      if (message.type === "approval.created" || message.type === "approval.updated") {
+        refreshApprovals(approvalFilterRef.current);
+        refreshSessions(selectedDeviceRef.current);
+      }
+    };
+    socket.onerror = () => setWSState("closed");
+    socket.onclose = () => setWSState("closed");
+  }
 
   async function createActivationCode() {
     setError("");
@@ -133,7 +216,7 @@ function App() {
       body: JSON.stringify({ name: "开发测试设备", expires_in_seconds: 600 })
     });
     if (!response.ok) {
-      setError(`${text.requestFailed}: ${response.status}`);
+      setError(await responseErrorMessage(response, text));
       return;
     }
     const body = await response.json();
@@ -144,18 +227,19 @@ function App() {
     setError("");
     const response = await fetch(`/api/v1/tenants/${tenantId}/devices`);
     if (!response.ok) {
-      setError(`${text.requestFailed}: ${response.status}`);
+      setError(await responseErrorMessage(response, text));
       return;
     }
     const body = await response.json();
     const items = body.data.items as Device[];
     setDevices(items);
-    if (!selectedDeviceID && items.length > 0) {
+    if (!selectedDeviceRef.current && items.length > 0) {
       setSelectedDeviceID(items[0].device_id);
+      refreshSessions(items[0].device_id);
     }
   }
 
-  async function refreshSessions(deviceID = selectedDeviceID) {
+  async function refreshSessions(deviceID = selectedDeviceRef.current) {
     if (!deviceID) {
       setSessions([]);
       return;
@@ -163,24 +247,23 @@ function App() {
     setError("");
     const response = await fetch(`/api/v1/devices/${deviceID}/sessions`);
     if (!response.ok) {
-      setError(`${text.requestFailed}: ${response.status}`);
+      setError(await responseErrorMessage(response, text));
       return;
     }
     const body = await response.json();
     setSessions(body.data.items);
   }
 
-  async function refreshApprovals(filter = approvalFilter) {
+  async function refreshApprovals(filter = approvalFilterRef.current) {
     setError("");
     const statusQuery = filter === "pending" ? "?status=waiting_decision" : "";
     const response = await fetch(`/api/v1/tenants/${tenantId}/approvals${statusQuery}`);
     if (!response.ok) {
-      setError(`${text.requestFailed}: ${response.status}`);
+      setError(await responseErrorMessage(response, text));
       return;
     }
     const body = await response.json();
     const items = body.data.items as Approval[];
-    // “已完成”只聚合终态，delivering 这类中间态保留在“全部”中可见。
     const completedStatuses = new Set(["delivered", "delivery_failed", "expired", "cancelled_by_local_input"]);
     setApprovals(filter === "completed" ? items.filter((item) => completedStatuses.has(item.status)) : items);
   }
@@ -192,24 +275,33 @@ function App() {
 
   async function decideApproval(approvalID: string, decisionType: "approve" | "reject" | "reply") {
     setError("");
-    const response = await fetch(`/api/v1/approvals/${approvalID}/decision`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Idempotency-Key": crypto.randomUUID(),
-        "X-Client-Instance-Id": "00000000-0000-0000-0000-000000000200"
-      },
-      body: JSON.stringify({
-        decision_type: decisionType,
-        payload: decisionType === "reply" ? "continue with tests only" : ""
-      })
-    });
-    if (!response.ok) {
-      setError(`${text.requestFailed}: ${response.status}`);
-      return;
+    setSubmittingApprovals((current) => new Set(current).add(approvalID));
+    try {
+      const response = await fetch(`/api/v1/approvals/${approvalID}/decision`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": crypto.randomUUID(),
+          "X-Client-Instance-Id": clientInstanceID
+        },
+        body: JSON.stringify({
+          decision_type: decisionType,
+          payload: decisionType === "reply" ? "continue with tests only" : ""
+        })
+      });
+      if (!response.ok) {
+        setError(await responseErrorMessage(response, text));
+        return;
+      }
+      await refreshApprovals();
+      await refreshSessions();
+    } finally {
+      setSubmittingApprovals((current) => {
+        const next = new Set(current);
+        next.delete(approvalID);
+        return next;
+      });
     }
-    await refreshApprovals();
-    await refreshSessions();
   }
 
   return (
@@ -237,6 +329,10 @@ function App() {
                 EN
               </button>
             </div>
+            <span className={`syncPill ${wsState}`}>
+              <Radio size={14} />
+              {text.sync}: {wsState}
+            </span>
             <span className="pill">{text.schema}</span>
           </div>
         </header>
@@ -254,10 +350,16 @@ function App() {
         </div>
         <section className="toolPanel">
           <div className="toolHeader">
-            <h2>{text.deviceList}</h2>
+            <div>
+              <h2>{text.deviceList}</h2>
+              <p className="metaText">{text.client}: {shortID(clientInstanceID) || "-"}</p>
+            </div>
             <div className="toolActions">
               <button onClick={createActivationCode}>{text.createCode}</button>
-              <button onClick={refreshDevices}>{text.refreshDevices}</button>
+              <button onClick={refreshDevices}>
+                <RefreshCw size={16} />
+                {text.refreshDevices}
+              </button>
             </div>
           </div>
           {activationCode ? (
@@ -292,7 +394,10 @@ function App() {
           <div className="toolHeader">
             <h2>{text.sessionList}</h2>
             <div className="toolActions">
-              <button onClick={() => refreshSessions()}>{text.refreshSessions}</button>
+              <button onClick={() => refreshSessions()}>
+                <RefreshCw size={16} />
+                {text.refreshSessions}
+              </button>
             </div>
           </div>
           <div className="deviceTable">
@@ -322,34 +427,81 @@ function App() {
                   {text.filters[filter]}
                 </button>
               ))}
-              <button onClick={() => refreshApprovals()}>{text.refreshApprovals}</button>
+              <button onClick={() => refreshApprovals()}>
+                <RefreshCw size={16} />
+                {text.refreshApprovals}
+              </button>
             </div>
           </div>
           <div className="approvalList">
             {approvals.length === 0 ? (
               <p>{text.noApprovals}</p>
             ) : (
-              approvals.map((approval) => (
-                <article className="approvalRow" key={approval.approval_id}>
-                  <div>
-                    <strong>{approval.prompt_text}</strong>
-                    <p>{approval.cli_type} / {approval.risk_level} / {approval.status}</p>
-                  </div>
-                  {approval.status === "waiting_decision" ? (
-                    <div className="toolActions">
-                      <button onClick={() => decideApproval(approval.approval_id, "approve")}>{text.approve}</button>
-                      <button onClick={() => decideApproval(approval.approval_id, "reject")}>{text.reject}</button>
-                      <button onClick={() => decideApproval(approval.approval_id, "reply")}>{text.reply}</button>
+              approvals.map((approval) => {
+                const isSubmitting = submittingApprovals.has(approval.approval_id);
+                return (
+                  <article className="approvalRow" key={approval.approval_id}>
+                    <div>
+                      <strong>{approval.prompt_text}</strong>
+                      <p>{approval.cli_type} / {approval.risk_level} / {approval.status}</p>
                     </div>
-                  ) : null}
-                </article>
-              ))
+                    {approval.status === "waiting_decision" ? (
+                      <div className="toolActions">
+                        <button disabled={isSubmitting} onClick={() => decideApproval(approval.approval_id, "approve")}>
+                          {isSubmitting ? text.submitting : text.approve}
+                        </button>
+                        <button disabled={isSubmitting} onClick={() => decideApproval(approval.approval_id, "reject")}>
+                          {text.reject}
+                        </button>
+                        <button disabled={isSubmitting} onClick={() => decideApproval(approval.approval_id, "reply")}>
+                          {text.reply}
+                        </button>
+                      </div>
+                    ) : null}
+                  </article>
+                );
+              })
             )}
           </div>
         </section>
       </section>
     </main>
   );
+}
+
+function getOrCreateClientInstanceKey() {
+  const existing = localStorage.getItem(clientInstanceKeyStorage);
+  if (existing) {
+    return existing;
+  }
+  const next = crypto.randomUUID();
+  localStorage.setItem(clientInstanceKeyStorage, next);
+  return next;
+}
+
+function browserDisplayName() {
+  const platform = navigator.platform || "Browser";
+  return `Web ${platform}`;
+}
+
+function shortID(value: string) {
+  return value ? value.slice(0, 8) : "";
+}
+
+async function responseErrorMessage(response: Response, text: typeof copy.zh) {
+  try {
+    const body = await response.json();
+    const code = body.error?.code;
+    if (code === "role_insufficient") {
+      return text.roleInsufficient;
+    }
+    if (code === "approval_already_decided") {
+      return text.alreadyDecided;
+    }
+    return `${text.requestFailed}: ${response.status} ${code || ""}`.trim();
+  } catch {
+    return `${text.requestFailed}: ${response.status}`;
+  }
 }
 
 createRoot(document.getElementById("root")!).render(<App />);

@@ -21,12 +21,15 @@ $requiredTables = @(
     "tenants",
     "device_activation_codes",
     "devices",
+    "client_instances",
     "device_tokens",
     "sessions",
     "approval_requests",
     "approval_deliveries",
+    "approval_notifications",
     "approval_actions",
-    "audit_logs"
+    "audit_logs",
+    "http_idempotency_keys"
 )
 
 foreach ($table in $requiredTables) {

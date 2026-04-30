@@ -5,10 +5,18 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync"
 	"testing"
+	"time"
+
+	"github.com/gorilla/websocket"
 )
 
 const testTenantID = "00000000-0000-0000-0000-000000000100"
+
+var testDeviceTokens sync.Map
+var testApprovalTokens sync.Map
 
 func TestDeviceSessionApprovalFlow(t *testing.T) {
 	resetTestStore()
@@ -103,6 +111,29 @@ func TestActivationCodeCanOnlyBeConsumedOnce(t *testing.T) {
 	}
 }
 
+func TestAgentSessionRequiresDeviceToken(t *testing.T) {
+	resetTestStore()
+	server := httptest.NewServer(newRouter())
+	defer server.Close()
+
+	code := createTestActivationCode(t, server.URL)
+	deviceID := registerTestDevice(t, server.URL, code)
+	body := postJSONWithHeaders(t, server.URL+"/api/v1/agent/sessions", map[string]any{
+		"device_id":             deviceID,
+		"cli_type":              "custom",
+		"command_line_redacted": "gatepilot fake",
+		"working_dir_hash":      "sha256:test",
+	}, map[string]string{
+		"Idempotency-Key": randomUUID(),
+		"Authorization":   "Bearer invalid",
+	}, http.StatusUnauthorized)
+
+	errorBody, ok := body["error"].(map[string]any)
+	if !ok || errorBody["code"] != "device_token_invalid" {
+		t.Fatalf("error code = %v, want device_token_invalid", body)
+	}
+}
+
 func TestApprovalDecisionRejectsSecondDecision(t *testing.T) {
 	resetTestStore()
 	server := httptest.NewServer(newRouter())
@@ -126,6 +157,383 @@ func TestApprovalDecisionRejectsSecondDecision(t *testing.T) {
 	}
 }
 
+func TestViewerCannotSubmitApprovalDecision(t *testing.T) {
+	resetTestStore()
+	server := httptest.NewServer(newRouter())
+	defer server.Close()
+
+	code := createTestActivationCode(t, server.URL)
+	deviceID := registerTestDevice(t, server.URL, code)
+	sessionID := createTestSession(t, server.URL, deviceID)
+	approvalID := createTestApproval(t, server.URL, deviceID, sessionID)
+
+	body := postJSONWithHeaders(t, server.URL+"/api/v1/approvals/"+approvalID+"/decision", map[string]any{
+		"decision_type": "approve",
+		"payload":       "",
+	}, map[string]string{
+		"Idempotency-Key": randomUUID(),
+		"X-Dev-Role":      "viewer",
+	}, http.StatusForbidden)
+
+	errorBody, ok := body["error"].(map[string]any)
+	if !ok || errorBody["code"] != "role_insufficient" {
+		t.Fatalf("error code = %v, want role_insufficient", body)
+	}
+}
+
+func TestApprovalDecisionIdempotencyReplaysFirstResult(t *testing.T) {
+	resetTestStore()
+	server := httptest.NewServer(newRouter())
+	defer server.Close()
+
+	code := createTestActivationCode(t, server.URL)
+	deviceID := registerTestDevice(t, server.URL, code)
+	sessionID := createTestSession(t, server.URL, deviceID)
+	approvalID := createTestApproval(t, server.URL, deviceID, sessionID)
+
+	headers := map[string]string{"Idempotency-Key": "same-decision-key"}
+	first := postJSONWithHeaders(t, server.URL+"/api/v1/approvals/"+approvalID+"/decision", map[string]any{
+		"decision_type": "approve",
+		"payload":       "",
+	}, headers, http.StatusOK)
+	replay := postJSONWithHeaders(t, server.URL+"/api/v1/approvals/"+approvalID+"/decision", map[string]any{
+		"decision_type": "approve",
+		"payload":       "",
+	}, headers, http.StatusOK)
+
+	if got, want := dataString(t, replay, "delivery_id"), dataString(t, first, "delivery_id"); got != want {
+		t.Fatalf("replayed delivery_id = %q, want %q", got, want)
+	}
+}
+
+func TestApprovalDecisionIdempotencyRejectsParameterConflict(t *testing.T) {
+	resetTestStore()
+	server := httptest.NewServer(newRouter())
+	defer server.Close()
+
+	code := createTestActivationCode(t, server.URL)
+	deviceID := registerTestDevice(t, server.URL, code)
+	sessionID := createTestSession(t, server.URL, deviceID)
+	approvalID := createTestApproval(t, server.URL, deviceID, sessionID)
+
+	headers := map[string]string{"Idempotency-Key": "conflicting-decision-key"}
+	postJSONWithHeaders(t, server.URL+"/api/v1/approvals/"+approvalID+"/decision", map[string]any{
+		"decision_type": "approve",
+		"payload":       "",
+	}, headers, http.StatusOK)
+	body := postJSONWithHeaders(t, server.URL+"/api/v1/approvals/"+approvalID+"/decision", map[string]any{
+		"decision_type": "reject",
+		"payload":       "",
+	}, headers, http.StatusConflict)
+
+	errorBody, ok := body["error"].(map[string]any)
+	if !ok || errorBody["code"] != "approval_decision_conflict" {
+		t.Fatalf("error code = %v, want approval_decision_conflict", body)
+	}
+}
+
+func TestActivationCodeIdempotencyReplaysFirstCode(t *testing.T) {
+	resetTestStore()
+	server := httptest.NewServer(newRouter())
+	defer server.Close()
+
+	headers := map[string]string{"Idempotency-Key": "activation-key"}
+	first := postJSONWithHeaders(t, server.URL+"/api/v1/tenants/"+testTenantID+"/device-activation-codes", map[string]any{
+		"name":               "test device",
+		"expires_in_seconds": 600,
+	}, headers, http.StatusCreated)
+	replay := postJSONWithHeaders(t, server.URL+"/api/v1/tenants/"+testTenantID+"/device-activation-codes", map[string]any{
+		"name":               "test device",
+		"expires_in_seconds": 600,
+	}, headers, http.StatusCreated)
+
+	if got, want := dataString(t, replay, "activation_code"), dataString(t, first, "activation_code"); got != want {
+		t.Fatalf("replayed activation_code = %q, want %q", got, want)
+	}
+}
+
+func TestAgentApprovalIdempotencyReplaysFirstApproval(t *testing.T) {
+	resetTestStore()
+	server := httptest.NewServer(newRouter())
+	defer server.Close()
+
+	code := createTestActivationCode(t, server.URL)
+	deviceID := registerTestDevice(t, server.URL, code)
+	sessionID := createTestSession(t, server.URL, deviceID)
+
+	first := createTestApprovalBody(t, server.URL, deviceID, sessionID, "approval-key")
+	replay := createTestApprovalBody(t, server.URL, deviceID, sessionID, "approval-key")
+	if got, want := dataString(t, replay, "approval_id"), dataString(t, first, "approval_id"); got != want {
+		t.Fatalf("replayed approval_id = %q, want %q", got, want)
+	}
+}
+
+func TestClientInstanceRegistrationIdempotencyReplaysFirstInstance(t *testing.T) {
+	resetTestStore()
+	server := httptest.NewServer(newRouter())
+	defer server.Close()
+
+	headers := map[string]string{"Idempotency-Key": "client-instance-key"}
+	first := postJSONWithHeaders(t, server.URL+"/api/v1/client-instances", map[string]any{
+		"tenant_id":    testTenantID,
+		"client_type":  "web",
+		"display_name": "Browser",
+		"app_version":  version,
+		"platform":     "browser",
+	}, headers, http.StatusCreated)
+	replay := postJSONWithHeaders(t, server.URL+"/api/v1/client-instances", map[string]any{
+		"tenant_id":    testTenantID,
+		"client_type":  "web",
+		"display_name": "Browser",
+		"app_version":  version,
+		"platform":     "browser",
+	}, headers, http.StatusCreated)
+
+	if got, want := dataString(t, replay, "client_instance_id"), dataString(t, first, "client_instance_id"); got != want {
+		t.Fatalf("replayed client_instance_id = %q, want %q", got, want)
+	}
+}
+
+func TestClientWebSocketReceivesApprovalCreatedAndUpdated(t *testing.T) {
+	resetTestStore()
+	server := httptest.NewServer(newRouter())
+	defer server.Close()
+
+	clientInstanceID := registerTestClientInstance(t, server.URL)
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/ws/client?tenant_id=" + testTenantID + "&client_instance_id=" + clientInstanceID
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	var connected map[string]any
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if err := conn.ReadJSON(&connected); err != nil {
+		t.Fatal(err)
+	}
+	if got := connected["type"]; got != "client.connected" {
+		t.Fatalf("client ws response type = %v, want client.connected", got)
+	}
+
+	code := createTestActivationCode(t, server.URL)
+	deviceID := registerTestDevice(t, server.URL, code)
+	sessionID := createTestSession(t, server.URL, deviceID)
+	approvalID := createTestApproval(t, server.URL, deviceID, sessionID)
+
+	var created struct {
+		Type    string `json:"type"`
+		Payload struct {
+			ApprovalID string `json:"approval_id"`
+		} `json:"payload"`
+	}
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if err := conn.ReadJSON(&created); err != nil {
+		t.Fatal(err)
+	}
+	if created.Type != "approval.created" || created.Payload.ApprovalID != approvalID {
+		t.Fatalf("created event = %+v, want approval %s", created, approvalID)
+	}
+
+	postJSONWithHeaders(t, server.URL+"/api/v1/approvals/"+approvalID+"/decision", map[string]any{
+		"decision_type": "approve",
+		"payload":       "",
+	}, map[string]string{
+		"Idempotency-Key":      randomUUID(),
+		"X-Client-Instance-Id": clientInstanceID,
+	}, http.StatusOK)
+
+	var updated struct {
+		Type    string `json:"type"`
+		Payload struct {
+			ApprovalID   string `json:"approval_id"`
+			Status       string `json:"status"`
+			DecisionType string `json:"decision_type"`
+		} `json:"payload"`
+	}
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if err := conn.ReadJSON(&updated); err != nil {
+		t.Fatal(err)
+	}
+	if updated.Type != "approval.updated" || updated.Payload.ApprovalID != approvalID || updated.Payload.Status != "delivering" || updated.Payload.DecisionType != "approve" {
+		t.Fatalf("updated event = %+v, want delivering approve for approval %s", updated, approvalID)
+	}
+}
+
+func TestAgentWebSocketHelloAndHeartbeat(t *testing.T) {
+	resetTestStore()
+	server := httptest.NewServer(newRouter())
+	defer server.Close()
+
+	code := createTestActivationCode(t, server.URL)
+	deviceID := registerTestDevice(t, server.URL, code)
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/ws/agent"
+	headers := http.Header{}
+	headers.Set("Authorization", "Bearer "+testTokenForDevice(t, deviceID))
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, headers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	if err := conn.WriteJSON(testWSEnvelope("agent.hello", map[string]any{
+		"device_id":        deviceID,
+		"agent_version":    version,
+		"protocol_version": "2026-04-01",
+		"platform":         "windows",
+		"capabilities":     map[string]any{"conpty": true},
+	})); err != nil {
+		t.Fatal(err)
+	}
+
+	var connected map[string]any
+	if err := conn.ReadJSON(&connected); err != nil {
+		t.Fatal(err)
+	}
+	if got := connected["type"]; got != "agent.connected" {
+		t.Fatalf("ws response type = %v, want agent.connected", got)
+	}
+
+	if err := conn.WriteJSON(testWSEnvelope("agent.heartbeat", map[string]any{
+		"active_sessions":   0,
+		"local_queue_depth": 0,
+		"last_error":        nil,
+	})); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestApprovalDecisionIsDeliveredOverAgentWebSocket(t *testing.T) {
+	resetTestStore()
+	server := httptest.NewServer(newRouter())
+	defer server.Close()
+
+	code := createTestActivationCode(t, server.URL)
+	deviceID := registerTestDevice(t, server.URL, code)
+	sessionID := createTestSession(t, server.URL, deviceID)
+	approvalID := createTestApproval(t, server.URL, deviceID, sessionID)
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/ws/agent"
+	headers := http.Header{}
+	headers.Set("Authorization", "Bearer "+testTokenForDevice(t, deviceID))
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, headers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	if err := conn.WriteJSON(testWSEnvelope("agent.hello", map[string]any{
+		"device_id":        deviceID,
+		"agent_version":    version,
+		"protocol_version": "2026-04-01",
+		"platform":         "windows",
+		"capabilities":     map[string]any{"conpty": true},
+	})); err != nil {
+		t.Fatal(err)
+	}
+	var connected map[string]any
+	if err := conn.ReadJSON(&connected); err != nil {
+		t.Fatal(err)
+	}
+
+	decision := postJSON(t, server.URL+"/api/v1/approvals/"+approvalID+"/decision", map[string]any{
+		"decision_type": "approve",
+		"payload":       "",
+	}, http.StatusOK)
+	deliveryID := dataString(t, decision, "delivery_id")
+
+	var deliver struct {
+		Type    string `json:"type"`
+		Payload struct {
+			DeliveryID string `json:"delivery_id"`
+			ApprovalID string `json:"approval_id"`
+			SessionID  string `json:"session_id"`
+		} `json:"payload"`
+	}
+	if err := conn.ReadJSON(&deliver); err != nil {
+		t.Fatal(err)
+	}
+	if deliver.Type != "approval.decision.deliver" || deliver.Payload.DeliveryID != deliveryID {
+		t.Fatalf("deliver = %+v, want delivery %s", deliver, deliveryID)
+	}
+
+	if err := conn.WriteJSON(testWSEnvelope("approval.decision.ack", map[string]any{
+		"delivery_id": deliver.Payload.DeliveryID,
+		"approval_id": deliver.Payload.ApprovalID,
+		"session_id":  deliver.Payload.SessionID,
+		"ack_result":  "written",
+		"detail":      map[string]any{"source": "unit-test-ws"},
+	})); err != nil {
+		t.Fatal(err)
+	}
+
+	var approvals map[string]any
+	for i := 0; i < 10; i++ {
+		approvals = getJSON(t, server.URL+"/api/v1/tenants/"+testTenantID+"/approvals", http.StatusOK)
+		for _, item := range dataItems(t, approvals) {
+			if item["approval_id"] == approvalID && item["status"] == "delivered" {
+				return
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("approval was not delivered after websocket ack: %v", approvals)
+}
+
+func TestPendingApprovalDecisionIsDeliveredWhenAgentReconnects(t *testing.T) {
+	resetTestStore()
+	server := httptest.NewServer(newRouter())
+	defer server.Close()
+
+	code := createTestActivationCode(t, server.URL)
+	deviceID := registerTestDevice(t, server.URL, code)
+	sessionID := createTestSession(t, server.URL, deviceID)
+	approvalID := createTestApproval(t, server.URL, deviceID, sessionID)
+
+	decision := postJSON(t, server.URL+"/api/v1/approvals/"+approvalID+"/decision", map[string]any{
+		"decision_type": "approve",
+		"payload":       "",
+	}, http.StatusOK)
+	deliveryID := dataString(t, decision, "delivery_id")
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/ws/agent"
+	headers := http.Header{}
+	headers.Set("Authorization", "Bearer "+testTokenForDevice(t, deviceID))
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, headers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	if err := conn.WriteJSON(testWSEnvelope("agent.hello", map[string]any{
+		"device_id":        deviceID,
+		"agent_version":    version,
+		"protocol_version": "2026-04-01",
+		"platform":         "windows",
+		"capabilities":     map[string]any{"conpty": true},
+	})); err != nil {
+		t.Fatal(err)
+	}
+	var connected map[string]any
+	if err := conn.ReadJSON(&connected); err != nil {
+		t.Fatal(err)
+	}
+
+	var deliver struct {
+		Type    string `json:"type"`
+		Payload struct {
+			DeliveryID string `json:"delivery_id"`
+		} `json:"payload"`
+	}
+	if err := conn.ReadJSON(&deliver); err != nil {
+		t.Fatal(err)
+	}
+	if deliver.Type != "approval.decision.deliver" || deliver.Payload.DeliveryID != deliveryID {
+		t.Fatalf("reconnect deliver = %+v, want delivery %s", deliver, deliveryID)
+	}
+}
+
 func createTestActivationCode(t *testing.T, baseURL string) string {
 	t.Helper()
 	body := postJSON(t, baseURL+"/api/v1/tenants/"+testTenantID+"/device-activation-codes", map[string]any{
@@ -133,6 +541,29 @@ func createTestActivationCode(t *testing.T, baseURL string) string {
 		"expires_in_seconds": 600,
 	}, http.StatusCreated)
 	return dataString(t, body, "activation_code")
+}
+
+func registerTestClientInstance(t *testing.T, baseURL string) string {
+	t.Helper()
+	body := postJSON(t, baseURL+"/api/v1/client-instances", map[string]any{
+		"tenant_id":    testTenantID,
+		"client_type":  "web",
+		"display_name": "Test Browser",
+		"app_version":  version,
+		"platform":     "browser",
+	}, http.StatusCreated)
+	return dataString(t, body, "client_instance_id")
+}
+
+func testWSEnvelope(messageType string, payload map[string]any) map[string]any {
+	return map[string]any{
+		"type":           messageType,
+		"message_id":     randomUUID(),
+		"trace_id":       "tr_test",
+		"sent_at":        time.Now().UTC().Format(time.RFC3339),
+		"schema_version": "2026-04-01",
+		"payload":        payload,
+	}
 }
 
 func registerTestDevice(t *testing.T, baseURL string, code string) string {
@@ -148,7 +579,9 @@ func registerTestDevice(t *testing.T, baseURL string, code string) string {
 			"conpty": true,
 		},
 	}, http.StatusCreated)
-	return dataString(t, body, "device_id")
+	deviceID := dataString(t, body, "device_id")
+	testDeviceTokens.Store(deviceID, dataString(t, body, "device_token"))
+	return deviceID
 }
 
 func createTestSession(t *testing.T, baseURL string, deviceID string) string {
@@ -165,6 +598,12 @@ func createTestSession(t *testing.T, baseURL string, deviceID string) string {
 
 func createTestApproval(t *testing.T, baseURL string, deviceID string, sessionID string) string {
 	t.Helper()
+	body := createTestApprovalBody(t, baseURL, deviceID, sessionID, randomUUID())
+	return dataString(t, body, "approval_id")
+}
+
+func createTestApprovalBody(t *testing.T, baseURL string, deviceID string, sessionID string, idempotencyKey string) map[string]any {
+	t.Helper()
 	body := postJSON(t, baseURL+"/api/v1/agent/approvals", map[string]any{
 		"device_id":          deviceID,
 		"session_id":         sessionID,
@@ -173,13 +612,19 @@ func createTestApproval(t *testing.T, baseURL string, deviceID string, sessionID
 		"risk_level":         "high",
 		"prompt_text":        "permission_request: allow command execution?",
 		"context_before":     "GatePilot fake AI CLI",
+		"idempotency_key":    idempotencyKey,
 		"suggested_actions":  []string{"approve", "reject", "reply"},
 		"expires_in_seconds": 300,
 	}, http.StatusCreated)
-	return dataString(t, body, "approval_id")
+	testApprovalTokens.Store(dataString(t, body, "approval_id"), testTokenForDevice(t, deviceID))
+	return body
 }
 
 func resetTestStore() {
+	testDeviceTokens = sync.Map{}
+	testApprovalTokens = sync.Map{}
+	agentHub = &agentConnectionHub{byDevice: map[string]*agentConnection{}}
+	clientHub = &clientConnectionHub{byTenant: map[string]map[string]*clientConnection{}}
 	// 每个测试隔离内存状态，避免激活码消费和审批状态相互影响。
 	if resettable, ok := store.(interface{ Reset() }); ok {
 		resettable.Reset()
@@ -200,11 +645,35 @@ func getJSON(t *testing.T, url string, wantStatus int) map[string]any {
 
 func postJSON(t *testing.T, url string, payload map[string]any, wantStatus int) map[string]any {
 	t.Helper()
+	return postJSONWithHeaders(t, url, payload, map[string]string{
+		"Idempotency-Key": randomUUID(),
+	}, wantStatus)
+}
+
+func postJSONWithHeaders(t *testing.T, url string, payload map[string]any, headers map[string]string, wantStatus int) map[string]any {
+	t.Helper()
 	body, err := json.Marshal(payload)
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp, err := http.Post(url, "application/json", bytes.NewReader(body))
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	for key, value := range headers {
+		req.Header.Set(key, value)
+	}
+	if req.Header.Get("Authorization") == "" {
+		if deviceID, ok := payload["device_id"].(string); ok {
+			req.Header.Set("Authorization", "Bearer "+testTokenForDevice(t, deviceID))
+		}
+		if approvalID, ok := payload["approval_id"].(string); ok {
+			req.Header.Set("Authorization", "Bearer "+testTokenForApproval(t, approvalID))
+		}
+	}
+
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -222,6 +691,24 @@ func decodeJSONResponse(t *testing.T, resp *http.Response, wantStatus int) map[s
 		t.Fatal(err)
 	}
 	return body
+}
+
+func testTokenForDevice(t *testing.T, deviceID string) string {
+	t.Helper()
+	value, ok := testDeviceTokens.Load(deviceID)
+	if !ok {
+		t.Fatalf("missing test token for device %s", deviceID)
+	}
+	return value.(string)
+}
+
+func testTokenForApproval(t *testing.T, approvalID string) string {
+	t.Helper()
+	value, ok := testApprovalTokens.Load(approvalID)
+	if !ok {
+		t.Fatalf("missing test token for approval %s", approvalID)
+	}
+	return value.(string)
 }
 
 func dataString(t *testing.T, body map[string]any, key string) string {
