@@ -1,6 +1,14 @@
 package main
 
-import "testing"
+import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
+	"testing"
+
+	"github.com/myucxy/gatepilot/agent/internal/localqueue"
+)
 
 func TestApprovalIdempotencyKeyIsStable(t *testing.T) {
 	got := approvalIdempotencyKey(
@@ -94,5 +102,82 @@ func TestSHA256String(t *testing.T) {
 	want := "5ebdeb186e2c69d8384030b47254f8de4407fff2a694129e9d61008eb27c8ce1"
 	if got != want {
 		t.Fatalf("sha256String() = %q, want %q", got, want)
+	}
+}
+
+func TestApprovalEventPayloadDefaultsExpiry(t *testing.T) {
+	payload := approvalEventPayload(localqueue.ApprovalEvent{
+		DeviceID:       "device-1",
+		SessionID:      "session-1",
+		CLIType:        "custom",
+		EventType:      "permission_request",
+		RiskLevel:      "high",
+		PromptText:     "allow command?",
+		ContextBefore:  "context",
+		IdempotencyKey: "idem-1",
+	})
+	if got := payload["expires_in_seconds"]; got != 300 {
+		t.Fatalf("expires_in_seconds = %v, want 300", got)
+	}
+	if got := payload["idempotency_key"]; got != "idem-1" {
+		t.Fatalf("idempotency_key = %v, want idem-1", got)
+	}
+}
+
+func TestFlushQueuedApprovalsPostsAndRemovesEvents(t *testing.T) {
+	queuePath := filepath.Join(t.TempDir(), "queue.jsonl")
+	t.Setenv("GATEPILOT_AGENT_QUEUE", queuePath)
+
+	queue := localqueue.New(queuePath)
+	if err := queue.EnqueueApproval(localqueue.ApprovalEvent{
+		EventID:          "evt_1",
+		DeviceID:         "device-1",
+		SessionID:        "session-1",
+		CLIType:          "custom",
+		EventType:        "permission_request",
+		RiskLevel:        "high",
+		PromptText:       "allow command?",
+		ContextBefore:    "context",
+		IdempotencyKey:   "idem-1",
+		SuggestedActions: []string{"approve", "reject"},
+		ExpiresInSeconds: 300,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	received := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/agent/approvals" {
+			t.Fatalf("path = %s, want approvals", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer token-1" {
+			t.Fatalf("authorization = %q, want bearer token", got)
+		}
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+		if payload["idempotency_key"] != "idem-1" {
+			t.Fatalf("payload = %v, want idempotency key", payload)
+		}
+		received++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"approval_id":"approval-1"}}`))
+	}))
+	defer server.Close()
+
+	flushed, err := flushQueuedApprovals(server.URL, "token-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if flushed != 1 || received != 1 {
+		t.Fatalf("flushed=%d received=%d, want 1", flushed, received)
+	}
+	items, err := queue.ListApprovals()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("queue items = %+v, want empty", items)
 	}
 }

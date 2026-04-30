@@ -16,6 +16,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/myucxy/gatepilot/agent/internal/adapter"
+	"github.com/myucxy/gatepilot/agent/internal/localqueue"
 )
 
 const (
@@ -50,6 +51,8 @@ func main() {
 		ackDecision(os.Args[2:])
 	case "connect":
 		connectAgent(os.Args[2:])
+	case "flush-queue":
+		flushQueue(os.Args[2:])
 	case "run":
 		runManagedCLI(os.Args[2:])
 	case "run-fake":
@@ -120,22 +123,32 @@ func runManagedCLI(args []string) {
 		os.Exit(1)
 	}
 
-	approvalBody := mustMarshal(map[string]any{
-		"device_id":          config.DeviceID,
-		"session_id":         sessionID,
-		"cli_type":           cliType,
-		"event_type":         event.EventType,
-		"risk_level":         event.RiskLevel,
-		"prompt_text":        event.PromptText,
-		"context_before":     event.ContextBefore,
-		"idempotency_key":    approvalIdempotencyKey(config.DeviceID, sessionID, cliType, event.PromptText, event.ContextBefore),
-		"suggested_actions":  event.SuggestedActions,
-		"expires_in_seconds": 300,
-	})
-	approvalResp, err := postJSONWithToken(config.ServerURL+"/api/v1/agent/approvals", approvalBody, config.DeviceToken)
+	queuedEvent := localqueue.ApprovalEvent{
+		EventID:          "evt_" + fmt.Sprintf("%d", time.Now().UnixNano()),
+		DeviceID:         config.DeviceID,
+		SessionID:        sessionID,
+		CLIType:          cliType,
+		EventType:        event.EventType,
+		RiskLevel:        event.RiskLevel,
+		PromptText:       event.PromptText,
+		ContextBefore:    event.ContextBefore,
+		IdempotencyKey:   approvalIdempotencyKey(config.DeviceID, sessionID, cliType, event.PromptText, event.ContextBefore),
+		SuggestedActions: event.SuggestedActions,
+		ExpiresInSeconds: 300,
+		CreatedAt:        time.Now().UTC(),
+	}
+	approvalResp, err := postQueuedApproval(config.ServerURL, config.DeviceToken, queuedEvent)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "create managed approval failed: %v\n", err)
-		os.Exit(1)
+		if queueErr := enqueueApprovalForRetry(queuedEvent); queueErr != nil {
+			fmt.Fprintf(os.Stderr, "create managed approval failed: %v; queue failed: %v\n", err, queueErr)
+			os.Exit(1)
+		}
+		fmt.Println(mustJSON(map[string]any{
+			"session_id": sessionID,
+			"event_id":   queuedEvent.EventID,
+			"queued":     true,
+		}))
+		return
 	}
 
 	fmt.Println(mustJSON(map[string]any{
@@ -144,6 +157,22 @@ func runManagedCLI(args []string) {
 		"status":      "waiting_decision",
 	}))
 	connectAgent([]string{"--device-id", config.DeviceID, "--wait-delivery"})
+}
+
+func flushQueue(args []string) {
+	config, err := loadAgentConfig()
+	if err != nil || config.DeviceID == "" {
+		fmt.Fprintln(os.Stderr, "agent is not registered; run register first or set GATEPILOT_AGENT_CONFIG")
+		os.Exit(2)
+	}
+	count, err := flushQueuedApprovals(config.ServerURL, config.DeviceToken)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "flush queue failed: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Println(mustJSON(map[string]any{
+		"flushed": count,
+	}))
 }
 
 func connectAgent(args []string) {
@@ -227,9 +256,15 @@ func connectAgent(args []string) {
 		}
 	}
 
+	if serverURL := serverURLForDevice(deviceID); serverURL != "" {
+		if _, err := flushQueuedApprovals(serverURL, deviceTokenFor(deviceID)); err != nil {
+			fmt.Fprintf(os.Stderr, "queue flush warning: %v\n", err)
+		}
+	}
+
 	if err := conn.WriteJSON(newWSEnvelope("agent.heartbeat", traceID, map[string]any{
 		"active_sessions":   0,
-		"local_queue_depth": 0,
+		"local_queue_depth": approvalQueueDepth(),
 		"last_error":        nil,
 	})); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -248,7 +283,7 @@ func connectAgent(args []string) {
 	for range ticker.C {
 		if err := conn.WriteJSON(newWSEnvelope("agent.heartbeat", traceID, map[string]any{
 			"active_sessions":   0,
-			"local_queue_depth": 0,
+			"local_queue_depth": approvalQueueDepth(),
 			"last_error":        nil,
 		})); err != nil {
 			fmt.Fprintln(os.Stderr, err)
@@ -605,6 +640,83 @@ func postJSONWithToken(url string, body []byte, token string) ([]byte, error) {
 	return respBody, nil
 }
 
+func postQueuedApproval(serverURL string, token string, event localqueue.ApprovalEvent) ([]byte, error) {
+	body, err := json.Marshal(approvalEventPayload(event))
+	if err != nil {
+		return nil, err
+	}
+	return postJSONWithToken(serverURL+"/api/v1/agent/approvals", body, token)
+}
+
+func approvalEventPayload(event localqueue.ApprovalEvent) map[string]any {
+	expiresIn := event.ExpiresInSeconds
+	if expiresIn <= 0 {
+		expiresIn = 300
+	}
+	return map[string]any{
+		"device_id":          event.DeviceID,
+		"session_id":         event.SessionID,
+		"cli_type":           event.CLIType,
+		"event_type":         event.EventType,
+		"risk_level":         event.RiskLevel,
+		"prompt_text":        event.PromptText,
+		"context_before":     event.ContextBefore,
+		"idempotency_key":    event.IdempotencyKey,
+		"suggested_actions":  event.SuggestedActions,
+		"expires_in_seconds": expiresIn,
+	}
+}
+
+func enqueueApprovalForRetry(event localqueue.ApprovalEvent) error {
+	queue, err := approvalQueue()
+	if err != nil {
+		return err
+	}
+	return queue.EnqueueApproval(event)
+}
+
+func flushQueuedApprovals(serverURL string, token string) (int, error) {
+	queue, err := approvalQueue()
+	if err != nil {
+		return 0, err
+	}
+	items, err := queue.ListApprovals()
+	if err != nil {
+		return 0, err
+	}
+	flushed := 0
+	for _, item := range items {
+		if _, err := postQueuedApproval(serverURL, token, item); err != nil {
+			return flushed, err
+		}
+		if err := queue.RemoveApproval(item.EventID); err != nil {
+			return flushed, err
+		}
+		flushed++
+	}
+	return flushed, nil
+}
+
+func approvalQueueDepth() int {
+	queue, err := approvalQueue()
+	if err != nil {
+		return 0
+	}
+	items, err := queue.ListApprovals()
+	if err != nil {
+		return 0
+	}
+	return len(items)
+}
+
+func approvalQueue() (localqueue.Queue, error) {
+	path, err := localqueue.DefaultPath()
+	if err != nil {
+		return localqueue.Queue{}, err
+	}
+	return localqueue.New(path), nil
+}
+
 func appendOutputChunk(serverURL string, deviceID string, deviceToken string, sessionID string, sequenceNo int64, streamType string, content string) error {
 	payload := map[string]any{
 		"device_id":        deviceID,
@@ -706,6 +818,20 @@ func deviceTokenFor(deviceID string) string {
 	}
 	if deviceID == "" || config.DeviceID == deviceID {
 		return config.DeviceToken
+	}
+	return ""
+}
+
+func serverURLForDevice(deviceID string) string {
+	if serverURL := os.Getenv("GATEPILOT_SERVER_URL"); serverURL != "" {
+		return serverURL
+	}
+	config, err := loadAgentConfig()
+	if err != nil {
+		return ""
+	}
+	if deviceID == "" || config.DeviceID == deviceID {
+		return config.ServerURL
 	}
 	return ""
 }
