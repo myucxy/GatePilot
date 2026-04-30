@@ -286,6 +286,31 @@ paths:
                         $ref: "#/components/schemas/SessionListResponse"
         "404":
           $ref: "#/components/responses/ErrorResponse"
+  /sessions/{session_id}:
+    get:
+      operationId: getSession
+      summary: Get a CLI session detail
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Session detail
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/Session"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
   /devices/{device_id}/grants:
     post:
       operationId: createDeviceGrant

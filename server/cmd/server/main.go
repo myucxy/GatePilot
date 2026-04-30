@@ -221,6 +221,7 @@ type gatePilotStore interface {
 	ExpireApprovals(now time.Time) []approval
 	AppendAuditLog(item auditLog, now time.Time)
 	ListAuditLogs(tenantID string) []auditLog
+	GetSession(sessionID string) (session, *appError)
 	ListDeviceSessions(deviceID string) []session
 	MarkDeviceSeen(deviceID string, now time.Time) *appError
 	MarkClientInstanceSeen(clientInstanceID string, now time.Time) *appError
@@ -746,6 +747,16 @@ func (s *memoryStore) ListAuditLogs(tenantID string) []auditLog {
 	return items
 }
 
+func (s *memoryStore) GetSession(sessionID string) (session, *appError) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	item, ok := s.sessions[sessionID]
+	if !ok {
+		return session{}, &appError{HTTPStatus: http.StatusNotFound, Code: "agent_session_not_found", Message: "session not found"}
+	}
+	return item, nil
+}
+
 func (s *memoryStore) ListDeviceSessions(deviceID string) []session {
 	items := []session{}
 	s.mu.Lock()
@@ -871,11 +882,34 @@ func newRouter() http.Handler {
 	mux.HandleFunc("/api/v1/agent/approval-acks", agentApprovalAcksHandler)
 	mux.HandleFunc("/api/v1/approvals/", approvalScopedHandler)
 	mux.HandleFunc("/api/v1/devices/", deviceScopedHandler)
+	mux.HandleFunc("/api/v1/sessions/", sessionScopedHandler)
 	mux.HandleFunc("/api/v1/tenants/", tenantScopedHandler)
 	mux.HandleFunc("/ws/agent", agentWebSocketHandler)
 	mux.HandleFunc("/ws/client", clientWebSocketHandler)
 
 	return requestLog(cors(mux))
+}
+
+func sessionScopedHandler(w http.ResponseWriter, r *http.Request) {
+	sessionID := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/v1/sessions/"), "/")
+	if sessionID == "" || strings.Contains(sessionID, "/") {
+		http.NotFound(w, r)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	item, appErr := store.GetSession(sessionID)
+	if appErr != nil {
+		writeAppError(w, r, appErr)
+		return
+	}
+	writeJSON(w, envelope{
+		Data:      item,
+		RequestID: requestID(r),
+		TraceID:   traceID(r),
+	})
 }
 
 func startWorkersFromEnv() {

@@ -59,6 +59,11 @@ func TestDeviceSessionApprovalFlow(t *testing.T) {
 	if got := items[0]["pending_approval_count"]; got != float64(0) {
 		t.Fatalf("pending approval count = %v, want 0", got)
 	}
+
+	sessionDetail := getJSON(t, server.URL+"/api/v1/sessions/"+sessionID, http.StatusOK)
+	if got := dataString(t, sessionDetail, "session_id"); got != sessionID {
+		t.Fatalf("session detail id = %q, want %q", got, sessionID)
+	}
 }
 
 func TestApprovalAckFailureMarksDeliveryFailed(t *testing.T) {

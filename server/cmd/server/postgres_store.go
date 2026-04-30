@@ -866,6 +866,26 @@ LIMIT 100`, tenantID)
 	return items
 }
 
+func (s *postgresStore) GetSession(sessionID string) (session, *appError) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	row := s.db.QueryRowContext(ctx, `
+SELECT id::text, tenant_id::text, device_id::text, cli_type, status, started_at, last_output_summary, pending_approval_count
+FROM sessions
+WHERE id = $1`, sessionID)
+	var item session
+	var startedAt time.Time
+	err := row.Scan(&item.SessionID, &item.TenantID, &item.DeviceID, &item.CLIType, &item.Status, &startedAt, &item.LastOutputSummary, &item.PendingApprovals)
+	if err == sql.ErrNoRows {
+		return session{}, &appError{HTTPStatus: http.StatusNotFound, Code: "agent_session_not_found", Message: "session not found"}
+	}
+	if err != nil {
+		return session{}, internalStoreError(err)
+	}
+	item.StartedAt = startedAt.Format(time.RFC3339)
+	return item, nil
+}
+
 func (s *postgresStore) ListDeviceSessions(deviceID string) []session {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
