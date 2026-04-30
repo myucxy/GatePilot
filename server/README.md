@@ -16,5 +16,6 @@ Endpoints:
 - `POST /api/v1/agent/sessions`
 - `GET /api/v1/devices/{device_id}/sessions`
 - `POST /api/v1/agent/approvals`
+- `POST /api/v1/agent/approval-acks`
 - `GET /api/v1/tenants/{tenant_id}/approvals`
 - `POST /api/v1/approvals/{approval_id}/decision`

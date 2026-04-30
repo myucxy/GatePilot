@@ -32,12 +32,82 @@ func main() {
 		createSession(os.Args[2:])
 	case "detect-approval":
 		detectApproval(os.Args[2:])
+	case "ack-decision":
+		ackDecision(os.Args[2:])
 	case "run-fake":
 		runFakeCLI()
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command %q\n", command)
 		os.Exit(2)
 	}
+}
+
+func ackDecision(args []string) {
+	approvalID := ""
+	deliveryID := ""
+	sessionID := ""
+	ackResult := "written"
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--approval-id":
+			if i+1 < len(args) {
+				approvalID = args[i+1]
+				i++
+			}
+		case "--delivery-id":
+			if i+1 < len(args) {
+				deliveryID = args[i+1]
+				i++
+			}
+		case "--session-id":
+			if i+1 < len(args) {
+				sessionID = args[i+1]
+				i++
+			}
+		case "--ack-result":
+			if i+1 < len(args) {
+				ackResult = args[i+1]
+				i++
+			}
+		}
+	}
+	if approvalID == "" || deliveryID == "" || sessionID == "" {
+		fmt.Fprintln(os.Stderr, "missing --approval-id, --delivery-id or --session-id")
+		os.Exit(2)
+	}
+
+	serverURL := getenv("GATEPILOT_SERVER_URL", "http://127.0.0.1:8080")
+	payload := map[string]any{
+		"approval_id": approvalID,
+		"delivery_id": deliveryID,
+		"session_id":  sessionID,
+		"ack_result":  ackResult,
+		"detail": map[string]any{
+			"source": "fake-cli",
+		},
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	// 决策 ACK 先走 HTTP 占位链路，后续替换为 Agent WebSocket 的 approval.decision.ack 消息。
+	client := http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Post(serverURL+"/api/v1/agent/approval-acks", "application/json", bytes.NewReader(body))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 300 {
+		fmt.Fprintf(os.Stderr, "ack decision failed: %s\n%s\n", resp.Status, string(respBody))
+		os.Exit(1)
+	}
+	fmt.Println(string(respBody))
 }
 
 func printVersion() {

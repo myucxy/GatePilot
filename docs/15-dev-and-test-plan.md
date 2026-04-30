@@ -355,6 +355,8 @@ Web 和 Mobile 至少覆盖以下 UI 状态：
 .\scripts\e2e-device-session.ps1
 ```
 
+该脚本覆盖 `waiting_decision -> delivering -> delivered` 的最小闭环：Web/API 提交决策后，Agent 通过 ACK 占位接口确认已经写回 fake CLI。
+
 ### E2E-3: Web 审批闭环
 
 1. fake CLI 输出审批 prompt。

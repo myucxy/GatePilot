@@ -193,6 +193,32 @@ paths:
                         $ref: "#/components/schemas/Approval"
         "404":
           $ref: "#/components/responses/ErrorResponse"
+  /agent/approval-acks:
+    post:
+      operationId: ackAgentApprovalDecision
+      summary: Acknowledge that Agent has written or accepted an approval decision
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AckAgentApprovalDecisionRequest"
+      responses:
+        "200":
+          description: Delivery acknowledged
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/AckAgentApprovalDecisionResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
   /devices/{device_id}/sessions:
     get:
       operationId: listDeviceSessions
@@ -714,6 +740,8 @@ components:
         - status
         - decision_type
         - decision_payload
+        - delivery_id
+        - delivery_status
         - decided_at
         - created_at
         - expires_at
@@ -742,6 +770,17 @@ components:
           type: string
         decision_payload:
           type: string
+        delivery_id:
+          type: string
+          format: uuid
+        delivery_status:
+          type: string
+          enum:
+            - pending
+            - sent
+            - acked
+            - failed
+            - cancelled
         decided_at:
           type: string
         created_at:
@@ -768,12 +807,16 @@ components:
       type: object
       required:
         - approval_id
+        - delivery_id
         - status
         - decision_type
         - delivery_status
         - decided_by
       properties:
         approval_id:
+          type: string
+          format: uuid
+        delivery_id:
           type: string
           format: uuid
         status:
@@ -818,3 +861,55 @@ components:
               format: uuid
             client_type:
               type: string
+    AckAgentApprovalDecisionRequest:
+      type: object
+      required:
+        - approval_id
+        - delivery_id
+        - session_id
+        - ack_result
+        - detail
+      properties:
+        approval_id:
+          type: string
+          format: uuid
+        delivery_id:
+          type: string
+          format: uuid
+        session_id:
+          type: string
+          format: uuid
+        ack_result:
+          type: string
+          enum:
+            - written
+            - accepted
+            - session_closed
+            - write_failed
+            - stale_decision
+        detail:
+          type: object
+    AckAgentApprovalDecisionResponse:
+      type: object
+      required:
+        - approval_id
+        - delivery_id
+        - status
+        - delivery_status
+      properties:
+        approval_id:
+          type: string
+          format: uuid
+        delivery_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum:
+            - delivered
+            - delivery_failed
+        delivery_status:
+          type: string
+          enum:
+            - acked
+            - failed

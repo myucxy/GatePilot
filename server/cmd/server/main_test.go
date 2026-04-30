@@ -24,8 +24,20 @@ func TestDeviceSessionApprovalFlow(t *testing.T) {
 		"decision_type": "approve",
 		"payload":       "",
 	}, http.StatusOK)
-	if got := dataString(t, decision, "status"); got != "delivered" {
-		t.Fatalf("approval status = %q, want delivered", got)
+	if got := dataString(t, decision, "status"); got != "delivering" {
+		t.Fatalf("approval status = %q, want delivering", got)
+	}
+	deliveryID := dataString(t, decision, "delivery_id")
+
+	ack := postJSON(t, server.URL+"/api/v1/agent/approval-acks", map[string]any{
+		"approval_id": approvalID,
+		"delivery_id": deliveryID,
+		"session_id":  sessionID,
+		"ack_result":  "written",
+		"detail":      map[string]any{"source": "unit-test"},
+	}, http.StatusOK)
+	if got := dataString(t, ack, "status"); got != "delivered" {
+		t.Fatalf("approval status after ack = %q, want delivered", got)
 	}
 
 	sessions := getJSON(t, server.URL+"/api/v1/devices/"+deviceID+"/sessions", http.StatusOK)
@@ -38,6 +50,34 @@ func TestDeviceSessionApprovalFlow(t *testing.T) {
 	}
 	if got := items[0]["pending_approval_count"]; got != float64(0) {
 		t.Fatalf("pending approval count = %v, want 0", got)
+	}
+}
+
+func TestApprovalAckFailureMarksDeliveryFailed(t *testing.T) {
+	resetTestStore()
+	server := httptest.NewServer(newRouter())
+	defer server.Close()
+
+	code := createTestActivationCode(t, server.URL)
+	deviceID := registerTestDevice(t, server.URL, code)
+	sessionID := createTestSession(t, server.URL, deviceID)
+	approvalID := createTestApproval(t, server.URL, deviceID, sessionID)
+	decision := postJSON(t, server.URL+"/api/v1/approvals/"+approvalID+"/decision", map[string]any{
+		"decision_type": "approve",
+	}, http.StatusOK)
+
+	ack := postJSON(t, server.URL+"/api/v1/agent/approval-acks", map[string]any{
+		"approval_id": approvalID,
+		"delivery_id": dataString(t, decision, "delivery_id"),
+		"session_id":  sessionID,
+		"ack_result":  "write_failed",
+		"detail":      map[string]any{"source": "unit-test"},
+	}, http.StatusOK)
+	if got := dataString(t, ack, "status"); got != "delivery_failed" {
+		t.Fatalf("approval status after failed ack = %q, want delivery_failed", got)
+	}
+	if got := dataString(t, ack, "delivery_status"); got != "failed" {
+		t.Fatalf("delivery status after failed ack = %q, want failed", got)
 	}
 }
 

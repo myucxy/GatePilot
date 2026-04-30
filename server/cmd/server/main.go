@@ -52,21 +52,24 @@ type session struct {
 }
 
 type approval struct {
-	ApprovalID      string `json:"approval_id"`
-	TenantID        string `json:"tenant_id"`
-	DeviceID        string `json:"device_id"`
-	SessionID       string `json:"session_id"`
-	CLIType         string `json:"cli_type"`
-	EventType       string `json:"event_type"`
-	RiskLevel       string `json:"risk_level"`
-	PromptText      string `json:"prompt_text"`
-	ContextBefore   string `json:"context_before"`
-	Status          string `json:"status"`
-	DecisionType    string `json:"decision_type"`
-	DecisionPayload string `json:"decision_payload"`
-	DecidedAt       string `json:"decided_at"`
-	CreatedAt       string `json:"created_at"`
-	ExpiresAt       string `json:"expires_at"`
+	ApprovalID      string            `json:"approval_id"`
+	TenantID        string            `json:"tenant_id"`
+	DeviceID        string            `json:"device_id"`
+	SessionID       string            `json:"session_id"`
+	CLIType         string            `json:"cli_type"`
+	EventType       string            `json:"event_type"`
+	RiskLevel       string            `json:"risk_level"`
+	PromptText      string            `json:"prompt_text"`
+	ContextBefore   string            `json:"context_before"`
+	Status          string            `json:"status"`
+	DecisionType    string            `json:"decision_type"`
+	DecisionPayload string            `json:"decision_payload"`
+	DeliveryID      string            `json:"delivery_id"`
+	DeliveryStatus  string            `json:"delivery_status"`
+	DecidedBy       map[string]string `json:"decided_by"`
+	DecidedAt       string            `json:"decided_at"`
+	CreatedAt       string            `json:"created_at"`
+	ExpiresAt       string            `json:"expires_at"`
 }
 
 type memoryStore struct {
@@ -102,6 +105,7 @@ func newRouter() http.Handler {
 	mux.HandleFunc("/api/v1/agent/register", agentRegisterHandler)
 	mux.HandleFunc("/api/v1/agent/sessions", agentSessionsHandler)
 	mux.HandleFunc("/api/v1/agent/approvals", agentApprovalsHandler)
+	mux.HandleFunc("/api/v1/agent/approval-acks", agentApprovalAcksHandler)
 	mux.HandleFunc("/api/v1/approvals/", approvalScopedHandler)
 	mux.HandleFunc("/api/v1/devices/", deviceScopedHandler)
 	mux.HandleFunc("/api/v1/tenants/", tenantScopedHandler)
@@ -295,7 +299,7 @@ func agentRegisterHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	deviceID := "dev_" + randomHex(12)
+	deviceID := randomUUID()
 	deviceToken := "dt_" + randomHex(24)
 	created := now.Format(time.RFC3339)
 	store.devices[deviceID] = device{
@@ -316,7 +320,7 @@ func agentRegisterHandler(w http.ResponseWriter, r *http.Request) {
 		Data: map[string]any{
 			"device_id":     deviceID,
 			"device_token":  deviceToken,
-			"server_ws_url": "ws://127.0.0.1:8080/ws/agent",
+			"server_ws_url": "ws://" + r.Host + "/ws/agent",
 		},
 		RequestID: requestID(r),
 		TraceID:   traceID(r),
@@ -353,7 +357,7 @@ func agentSessionsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sessionID := "ses_" + randomHex(12)
+	sessionID := randomUUID()
 	item := session{
 		SessionID:         sessionID,
 		TenantID:          deviceItem.TenantID,
@@ -414,20 +418,21 @@ func agentApprovalsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	approvalID := "apr_" + randomHex(12)
+	approvalID := randomUUID()
 	item := approval{
-		ApprovalID:    approvalID,
-		TenantID:      sessionItem.TenantID,
-		DeviceID:      req.DeviceID,
-		SessionID:     req.SessionID,
-		CLIType:       firstNonEmpty(req.CLIType, sessionItem.CLIType),
-		EventType:     req.EventType,
-		RiskLevel:     req.RiskLevel,
-		PromptText:    firstNonEmpty(req.PromptText, "allow command execution?"),
-		ContextBefore: req.ContextBefore,
-		Status:        "waiting_decision",
-		CreatedAt:     now.Format(time.RFC3339),
-		ExpiresAt:     now.Add(time.Duration(req.ExpiresIn) * time.Second).Format(time.RFC3339),
+		ApprovalID:     approvalID,
+		TenantID:       sessionItem.TenantID,
+		DeviceID:       req.DeviceID,
+		SessionID:      req.SessionID,
+		CLIType:        firstNonEmpty(req.CLIType, sessionItem.CLIType),
+		EventType:      req.EventType,
+		RiskLevel:      req.RiskLevel,
+		PromptText:     firstNonEmpty(req.PromptText, "allow command execution?"),
+		ContextBefore:  req.ContextBefore,
+		Status:         "waiting_decision",
+		DeliveryStatus: "pending",
+		CreatedAt:      now.Format(time.RFC3339),
+		ExpiresAt:      now.Add(time.Duration(req.ExpiresIn) * time.Second).Format(time.RFC3339),
 	}
 	store.approvals[approvalID] = item
 	sessionItem.Status = "waiting_approval"
@@ -496,24 +501,111 @@ func submitApprovalDecisionHandler(w http.ResponseWriter, r *http.Request, appro
 		return
 	}
 
-	item.Status = "delivered"
+	// 用户提交决策只代表控制面已接收，真正完成必须等待 Agent 回写 CLI 后 ACK。
+	item.Status = "delivering"
 	item.DecisionType = req.DecisionType
 	item.DecisionPayload = req.Payload
+	item.DeliveryID = randomUUID()
+	item.DeliveryStatus = "sent"
+	item.DecidedBy = map[string]string{
+		"actor_type":         "user",
+		"actor_id":           "00000000-0000-0000-0000-000000000001",
+		"display_name":       "Local Owner",
+		"client_instance_id": firstNonEmpty(r.Header.Get("X-Client-Instance-Id"), "00000000-0000-0000-0000-000000000200"),
+		"client_type":        "web",
+	}
 	item.DecidedAt = now
 	store.approvals[approvalID] = item
 
 	if sessionItem, ok := store.sessions[item.SessionID]; ok {
-		sessionItem.Status = "running"
-		if sessionItem.PendingApprovals > 0 {
-			sessionItem.PendingApprovals--
-		}
-		sessionItem.LastOutputSummary = "approval " + req.DecisionType + " delivered"
+		sessionItem.Status = "waiting_approval"
+		sessionItem.LastOutputSummary = "approval " + req.DecisionType + " delivering"
 		store.sessions[item.SessionID] = sessionItem
 	}
 	store.mu.Unlock()
 
 	writeJSON(w, envelope{
 		Data:      item,
+		RequestID: requestID(r),
+		TraceID:   traceID(r),
+	})
+}
+
+func agentApprovalAcksHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		ApprovalID string         `json:"approval_id"`
+		DeliveryID string         `json:"delivery_id"`
+		SessionID  string         `json:"session_id"`
+		AckResult  string         `json:"ack_result"`
+		Detail     map[string]any `json:"detail"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, r, http.StatusBadRequest, "message_schema_invalid", err.Error())
+		return
+	}
+	if req.AckResult == "" {
+		req.AckResult = "written"
+	}
+
+	store.mu.Lock()
+	item, ok := store.approvals[req.ApprovalID]
+	if !ok {
+		store.mu.Unlock()
+		writeError(w, r, http.StatusNotFound, "approval_not_found", "approval not found")
+		return
+	}
+	if item.Status == "delivered" && item.DeliveryStatus == "acked" {
+		store.mu.Unlock()
+		writeJSON(w, envelope{
+			Data: map[string]any{
+				"approval_id":     item.ApprovalID,
+				"delivery_id":     item.DeliveryID,
+				"status":          item.Status,
+				"delivery_status": item.DeliveryStatus,
+			},
+			RequestID: requestID(r),
+			TraceID:   traceID(r),
+		})
+		return
+	}
+	if item.Status != "delivering" || item.SessionID != req.SessionID || item.DeliveryID != req.DeliveryID {
+		store.mu.Unlock()
+		writeError(w, r, http.StatusConflict, "delivery_failed", "delivery ack does not match an active delivery")
+		return
+	}
+
+	switch req.AckResult {
+	case "written", "accepted":
+		item.Status = "delivered"
+		item.DeliveryStatus = "acked"
+	default:
+		item.Status = "delivery_failed"
+		item.DeliveryStatus = "failed"
+	}
+	store.approvals[item.ApprovalID] = item
+
+	if sessionItem, ok := store.sessions[item.SessionID]; ok {
+		sessionItem.Status = "running"
+		if sessionItem.PendingApprovals > 0 {
+			sessionItem.PendingApprovals--
+		}
+		sessionItem.LastOutputSummary = "approval " + item.DecisionType + " " + item.Status
+		store.sessions[item.SessionID] = sessionItem
+	}
+	store.mu.Unlock()
+
+	writeJSON(w, envelope{
+		Data: map[string]any{
+			"approval_id":     item.ApprovalID,
+			"delivery_id":     item.DeliveryID,
+			"status":          item.Status,
+			"delivery_status": item.DeliveryStatus,
+		},
 		RequestID: requestID(r),
 		TraceID:   traceID(r),
 	})
@@ -613,6 +705,16 @@ func randomHex(bytes int) string {
 		return fmt.Sprintf("%d", time.Now().UnixNano())
 	}
 	return strings.ToUpper(hex.EncodeToString(buffer))
+}
+
+func randomUUID() string {
+	buffer := make([]byte, 16)
+	if _, err := rand.Read(buffer); err != nil {
+		return fmt.Sprintf("00000000-0000-4000-8000-%012d", time.Now().UnixNano()%1_000_000_000_000)
+	}
+	buffer[6] = (buffer[6] & 0x0f) | 0x40
+	buffer[8] = (buffer[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%x-%x-%x-%x-%x", buffer[0:4], buffer[4:6], buffer[6:8], buffer[8:10], buffer[10:16])
 }
 
 func firstNonEmpty(values ...string) string {

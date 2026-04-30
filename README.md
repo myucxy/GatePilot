@@ -94,7 +94,7 @@ M1/M2 端到端冒烟：
 .\scripts\e2e-device-session.ps1
 ```
 
-该脚本会临时启动 Server，生成设备激活码，调用 Agent 注册设备，创建 fake CLI 会话，上报 fake 审批并提交批准决策。
+该脚本会临时启动 Server，生成设备激活码，调用 Agent 注册设备，创建 fake CLI 会话，上报 fake 审批，提交批准决策，并模拟 Agent ACK 投递结果。
 
 Web 管理端：
 

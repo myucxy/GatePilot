@@ -103,6 +103,8 @@ type Approval = {
   risk_level: string;
   prompt_text: string;
   status: string;
+  delivery_id: string;
+  delivery_status: string;
   decision_type: string;
   created_at: string;
   expires_at: string;
@@ -178,8 +180,9 @@ function App() {
     }
     const body = await response.json();
     const items = body.data.items as Approval[];
-    // “已完成”在骨架阶段由前端聚合非待处理状态，后续可替换为服务端 status_group 查询。
-    setApprovals(filter === "completed" ? items.filter((item) => item.status !== "waiting_decision") : items);
+    // “已完成”只聚合终态，delivering 这类中间态保留在“全部”中可见。
+    const completedStatuses = new Set(["delivered", "delivery_failed", "expired", "cancelled_by_local_input"]);
+    setApprovals(filter === "completed" ? items.filter((item) => completedStatuses.has(item.status)) : items);
   }
 
   function changeApprovalFilter(filter: ApprovalFilter) {

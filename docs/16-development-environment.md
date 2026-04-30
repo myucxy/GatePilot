@@ -34,7 +34,7 @@ $env:Path = "D:\Dev\Env\Go\bin;D:\Dev\Env\nodejs;D:\Dev\Env\Flutter\flutter\bin;
 配置位置：
 
 ```text
-mobile/android/app/build.gradle
+mobile/android/app/build.gradle.kts
 ```
 
 关键配置：
