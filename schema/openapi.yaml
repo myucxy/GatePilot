@@ -161,6 +161,82 @@ paths:
                         $ref: "#/components/schemas/DeviceListResponse"
         "403":
           $ref: "#/components/responses/ErrorResponse"
+  /devices/{device_id}:
+    get:
+      operationId: getDevice
+      summary: Get a device detail
+      parameters:
+        - name: device_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Device detail
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/Device"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+  /devices/{device_id}/disable:
+    post:
+      operationId: disableDevice
+      summary: Disable a device and revoke active device tokens
+      parameters:
+        - name: device_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Device disabled
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/Device"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+  /devices/{device_id}/rotate-token:
+    post:
+      operationId: rotateDeviceToken
+      summary: Rotate a device token and return the new token once
+      parameters:
+        - name: device_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Device token rotated
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/RotateDeviceTokenResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
   /agent/register:
     post:
       operationId: registerAgent
@@ -862,6 +938,20 @@ components:
           nullable: true
         has_more:
           type: boolean
+    RotateDeviceTokenResponse:
+      type: object
+      required:
+        - device_id
+        - device_token
+        - status
+      properties:
+        device_id:
+          type: string
+          format: uuid
+        device_token:
+          type: string
+        status:
+          type: string
     SubmitApprovalDecisionRequest:
       type: object
       required:

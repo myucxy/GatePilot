@@ -225,16 +225,106 @@ ORDER BY created_at DESC`, tenantID)
 
 	items := []device{}
 	for rows.Next() {
-		var item device
-		var lastSeen, createdAt time.Time
-		if err := rows.Scan(&item.DeviceID, &item.TenantID, &item.Name, &item.Platform, &item.Arch, &item.Status, &lastSeen, &createdAt); err != nil {
+		item, err := scanDevice(rows)
+		if err != nil {
 			return []device{}
 		}
-		item.LastSeen = lastSeen.Format(time.RFC3339)
-		item.CreatedAt = createdAt.Format(time.RFC3339)
 		items = append(items, item)
 	}
 	return items
+}
+
+func (s *postgresStore) GetDevice(deviceID string) (device, *appError) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	row := s.db.QueryRowContext(ctx, `
+SELECT id::text, tenant_id::text, name, platform, arch, status, last_seen_at, created_at
+FROM devices
+WHERE id = $1`, deviceID)
+	item, err := scanDevice(row)
+	if err == sql.ErrNoRows {
+		return device{}, &appError{HTTPStatus: http.StatusNotFound, Code: "device_offline", Message: "device not found"}
+	}
+	if err != nil {
+		return device{}, internalStoreError(err)
+	}
+	return item, nil
+}
+
+func (s *postgresStore) DisableDevice(deviceID string, now time.Time) (device, *appError) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return device{}, internalStoreError(err)
+	}
+	defer tx.Rollback()
+
+	row := tx.QueryRowContext(ctx, `
+UPDATE devices
+SET status = 'disabled', updated_at = $1
+WHERE id = $2
+RETURNING id::text, tenant_id::text, name, platform, arch, status, last_seen_at, created_at`, now, deviceID)
+	item, err := scanDevice(row)
+	if err == sql.ErrNoRows {
+		return device{}, &appError{HTTPStatus: http.StatusNotFound, Code: "device_offline", Message: "device not found"}
+	}
+	if err != nil {
+		return device{}, internalStoreError(err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+UPDATE device_tokens
+SET status = 'revoked', revoked_at = COALESCE(revoked_at, $1)
+WHERE device_id = $2 AND status = 'active'`, now, deviceID); err != nil {
+		return device{}, internalStoreError(err)
+	}
+	if err := tx.Commit(); err != nil {
+		return device{}, internalStoreError(err)
+	}
+	return item, nil
+}
+
+func (s *postgresStore) RotateDeviceToken(deviceID string, now time.Time) (device, string, *appError) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return device{}, "", internalStoreError(err)
+	}
+	defer tx.Rollback()
+
+	row := tx.QueryRowContext(ctx, `
+SELECT id::text, tenant_id::text, name, platform, arch, status, last_seen_at, created_at
+FROM devices
+WHERE id = $1
+FOR UPDATE`, deviceID)
+	item, err := scanDevice(row)
+	if err == sql.ErrNoRows {
+		return device{}, "", &appError{HTTPStatus: http.StatusNotFound, Code: "device_offline", Message: "device not found"}
+	}
+	if err != nil {
+		return device{}, "", internalStoreError(err)
+	}
+	if item.Status == "disabled" {
+		return device{}, "", &appError{HTTPStatus: http.StatusForbidden, Code: "device_disabled", Message: "device is disabled"}
+	}
+
+	deviceToken := "dt_" + randomHex(24)
+	if _, err := tx.ExecContext(ctx, `
+UPDATE device_tokens
+SET status = 'rotated', rotated_at = COALESCE(rotated_at, $1)
+WHERE device_id = $2 AND status = 'active'`, now, deviceID); err != nil {
+		return device{}, "", internalStoreError(err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO device_tokens(id, device_id, token_hash, status, created_at)
+VALUES ($1, $2, $3, 'active', $4)`, randomUUID(), deviceID, sha256Hex(deviceToken), now); err != nil {
+		return device{}, "", internalStoreError(err)
+	}
+	if err := tx.Commit(); err != nil {
+		return device{}, "", internalStoreError(err)
+	}
+	return item, deviceToken, nil
 }
 
 func (s *postgresStore) RegisterAgent(req registerAgentRequest, now time.Time) (device, string, *appError) {
@@ -313,12 +403,16 @@ func (s *postgresStore) CreateSession(req createAgentSessionRequest, now time.Ti
 	defer cancel()
 
 	var tenantID string
-	err := s.db.QueryRowContext(ctx, "SELECT tenant_id::text FROM devices WHERE id = $1", req.DeviceID).Scan(&tenantID)
+	var deviceStatus string
+	err := s.db.QueryRowContext(ctx, "SELECT tenant_id::text, status FROM devices WHERE id = $1", req.DeviceID).Scan(&tenantID, &deviceStatus)
 	if err == sql.ErrNoRows {
 		return session{}, &appError{HTTPStatus: http.StatusNotFound, Code: "device_offline", Message: "device not found"}
 	}
 	if err != nil {
 		return session{}, internalStoreError(err)
+	}
+	if deviceStatus == "disabled" {
+		return session{}, &appError{HTTPStatus: http.StatusForbidden, Code: "device_disabled", Message: "device is disabled"}
 	}
 
 	item := session{
@@ -1155,7 +1249,7 @@ func (s *postgresStore) MarkDeviceSeen(deviceID string, now time.Time) *appError
 	result, err := s.db.ExecContext(ctx, `
 UPDATE devices
 SET status = 'active', last_seen_at = $1, updated_at = $1
-WHERE id = $2`, now, deviceID)
+WHERE id = $2 AND status <> 'disabled'`, now, deviceID)
 	if err != nil {
 		return internalStoreError(err)
 	}
@@ -1164,6 +1258,14 @@ WHERE id = $2`, now, deviceID)
 		return internalStoreError(err)
 	}
 	if rows == 0 {
+		var status string
+		err := s.db.QueryRowContext(ctx, `SELECT status FROM devices WHERE id = $1`, deviceID).Scan(&status)
+		if err == nil && status == "disabled" {
+			return &appError{HTTPStatus: http.StatusForbidden, Code: "device_disabled", Message: "device is disabled"}
+		}
+		if err != nil && err != sql.ErrNoRows {
+			return internalStoreError(err)
+		}
 		return &appError{HTTPStatus: http.StatusNotFound, Code: "device_offline", Message: "device not found"}
 	}
 	return nil
@@ -1196,15 +1298,25 @@ func (s *postgresStore) ValidateDeviceToken(deviceID string, token string) *appE
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
+	var deviceStatus string
 	var exists bool
 	err := s.db.QueryRowContext(ctx, `
-SELECT EXISTS (
-    SELECT 1
-    FROM device_tokens
-    WHERE device_id = $1 AND token_hash = $2 AND status = 'active'
-)`, deviceID, sha256Hex(token)).Scan(&exists)
+SELECT d.status,
+       EXISTS (
+           SELECT 1
+           FROM device_tokens dt
+           WHERE dt.device_id = d.id AND dt.token_hash = $2 AND dt.status = 'active'
+       )
+FROM devices d
+WHERE d.id = $1`, deviceID, sha256Hex(token)).Scan(&deviceStatus, &exists)
+	if err == sql.ErrNoRows {
+		return &appError{HTTPStatus: http.StatusUnauthorized, Code: "device_token_invalid", Message: "device token is invalid"}
+	}
 	if err != nil {
 		return internalStoreError(err)
+	}
+	if deviceStatus == "disabled" {
+		return &appError{HTTPStatus: http.StatusForbidden, Code: "device_disabled", Message: "device is disabled"}
 	}
 	if !exists {
 		return &appError{HTTPStatus: http.StatusUnauthorized, Code: "device_token_invalid", Message: "device token is invalid"}
@@ -1219,25 +1331,28 @@ func (s *postgresStore) ValidateApprovalDeviceToken(approvalID string, token str
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
+	var deviceStatus string
 	var exists bool
 	err := s.db.QueryRowContext(ctx, `
-SELECT EXISTS (
-    SELECT 1
-    FROM approval_requests ar
-    JOIN device_tokens dt ON dt.device_id = ar.device_id
-    WHERE ar.id = $1 AND dt.token_hash = $2 AND dt.status = 'active'
-)`, approvalID, sha256Hex(token)).Scan(&exists)
+SELECT d.status,
+       EXISTS (
+           SELECT 1
+           FROM device_tokens dt
+           WHERE dt.device_id = ar.device_id AND dt.token_hash = $2 AND dt.status = 'active'
+       )
+FROM approval_requests ar
+JOIN devices d ON d.id = ar.device_id
+WHERE ar.id = $1`, approvalID, sha256Hex(token)).Scan(&deviceStatus, &exists)
+	if err == sql.ErrNoRows {
+		return &appError{HTTPStatus: http.StatusNotFound, Code: "approval_not_found", Message: "approval not found"}
+	}
 	if err != nil {
 		return internalStoreError(err)
 	}
+	if deviceStatus == "disabled" {
+		return &appError{HTTPStatus: http.StatusForbidden, Code: "device_disabled", Message: "device is disabled"}
+	}
 	if !exists {
-		var approvalExists bool
-		if err := s.db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM approval_requests WHERE id = $1)`, approvalID).Scan(&approvalExists); err != nil {
-			return internalStoreError(err)
-		}
-		if !approvalExists {
-			return &appError{HTTPStatus: http.StatusNotFound, Code: "approval_not_found", Message: "approval not found"}
-		}
 		return &appError{HTTPStatus: http.StatusUnauthorized, Code: "device_token_invalid", Message: "device token is invalid"}
 	}
 	return nil
@@ -1351,6 +1466,22 @@ type outputChunkScanner interface {
 
 type sessionScanner interface {
 	Scan(dest ...any) error
+}
+
+type deviceScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanDevice(scanner deviceScanner) (device, error) {
+	var item device
+	var lastSeen, createdAt time.Time
+	err := scanner.Scan(&item.DeviceID, &item.TenantID, &item.Name, &item.Platform, &item.Arch, &item.Status, &lastSeen, &createdAt)
+	if err != nil {
+		return device{}, err
+	}
+	item.LastSeen = lastSeen.Format(time.RFC3339)
+	item.CreatedAt = createdAt.Format(time.RFC3339)
+	return item, nil
 }
 
 func scanSession(scanner sessionScanner) (session, error) {

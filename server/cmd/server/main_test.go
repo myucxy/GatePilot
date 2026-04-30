@@ -753,6 +753,94 @@ func TestDeviceGrantListAndRevoke(t *testing.T) {
 	}
 }
 
+func TestDeviceTokenRotationInvalidatesOldToken(t *testing.T) {
+	resetTestStore()
+	server := httptest.NewServer(newRouter())
+	defer server.Close()
+
+	code := createTestActivationCode(t, server.URL)
+	deviceID := registerTestDevice(t, server.URL, code)
+	oldToken := testTokenForDevice(t, deviceID)
+
+	rotate := postJSON(t, server.URL+"/api/v1/devices/"+deviceID+"/rotate-token", map[string]any{}, http.StatusOK)
+	newToken := dataString(t, rotate, "device_token")
+	if newToken == oldToken {
+		t.Fatal("rotated device token matched old token")
+	}
+
+	body := postJSONWithHeaders(t, server.URL+"/api/v1/agent/sessions", map[string]any{
+		"device_id":             deviceID,
+		"cli_type":              "custom",
+		"command_line_redacted": "gatepilot fake",
+		"working_dir_hash":      "sha256:test",
+	}, map[string]string{
+		"Authorization": "Bearer " + oldToken,
+	}, http.StatusUnauthorized)
+	errorBody, ok := body["error"].(map[string]any)
+	if !ok || errorBody["code"] != "device_token_invalid" {
+		t.Fatalf("old token error = %v, want device_token_invalid", body)
+	}
+
+	session := postJSONWithHeaders(t, server.URL+"/api/v1/agent/sessions", map[string]any{
+		"device_id":             deviceID,
+		"cli_type":              "custom",
+		"command_line_redacted": "gatepilot fake",
+		"working_dir_hash":      "sha256:test",
+	}, map[string]string{
+		"Authorization": "Bearer " + newToken,
+	}, http.StatusCreated)
+	if got := dataString(t, session, "device_id"); got != deviceID {
+		t.Fatalf("session device = %q, want %q", got, deviceID)
+	}
+}
+
+func TestDeviceDisableRevokesTokenAndWritesAudit(t *testing.T) {
+	resetTestStore()
+	server := httptest.NewServer(newRouter())
+	defer server.Close()
+
+	code := createTestActivationCode(t, server.URL)
+	deviceID := registerTestDevice(t, server.URL, code)
+	oldToken := testTokenForDevice(t, deviceID)
+
+	disabled := postJSON(t, server.URL+"/api/v1/devices/"+deviceID+"/disable", map[string]any{}, http.StatusOK)
+	if got := dataString(t, disabled, "status"); got != "disabled" {
+		t.Fatalf("disabled status = %q, want disabled", got)
+	}
+	detail := getJSON(t, server.URL+"/api/v1/devices/"+deviceID, http.StatusOK)
+	if got := dataString(t, detail, "status"); got != "disabled" {
+		t.Fatalf("device detail status = %q, want disabled", got)
+	}
+
+	body := postJSONWithHeaders(t, server.URL+"/api/v1/agent/sessions", map[string]any{
+		"device_id":             deviceID,
+		"cli_type":              "custom",
+		"command_line_redacted": "gatepilot fake",
+		"working_dir_hash":      "sha256:test",
+	}, map[string]string{
+		"Authorization": "Bearer " + oldToken,
+	}, http.StatusForbidden)
+	errorBody, ok := body["error"].(map[string]any)
+	if !ok || errorBody["code"] != "device_disabled" {
+		t.Fatalf("disabled device error = %v, want device_disabled", body)
+	}
+
+	rotate := postJSON(t, server.URL+"/api/v1/devices/"+deviceID+"/rotate-token", map[string]any{}, http.StatusForbidden)
+	errorBody, ok = rotate["error"].(map[string]any)
+	if !ok || errorBody["code"] != "device_disabled" {
+		t.Fatalf("disabled rotate error = %v, want device_disabled", rotate)
+	}
+
+	audit := getJSON(t, server.URL+"/api/v1/tenants/"+testTenantID+"/audit-logs", http.StatusOK)
+	actions := map[string]bool{}
+	for _, item := range dataItems(t, audit) {
+		actions[item["action"].(string)] = true
+	}
+	if !actions["device.disable"] {
+		t.Fatalf("audit actions = %v, want device.disable", actions)
+	}
+}
+
 func TestAgentWebSocketHelloAndHeartbeat(t *testing.T) {
 	resetTestStore()
 	server := httptest.NewServer(newRouter())

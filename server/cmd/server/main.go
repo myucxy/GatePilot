@@ -243,6 +243,9 @@ type gatePilotStore interface {
 	RegisterClientInstance(req registerClientInstanceRequest, userID string, idempotencyKey string, now time.Time) (clientInstance, *appError)
 	CreateActivationCode(tenantID string, req createActivationCodeRequest, idempotencyKey string, now time.Time) (string, time.Time, *appError)
 	ListDevices(tenantID string) []device
+	GetDevice(deviceID string) (device, *appError)
+	DisableDevice(deviceID string, now time.Time) (device, *appError)
+	RotateDeviceToken(deviceID string, now time.Time) (device, string, *appError)
 	RegisterAgent(req registerAgentRequest, now time.Time) (device, string, *appError)
 	CreateSession(req createAgentSessionRequest, now time.Time) (session, *appError)
 	UpdateSession(req updateAgentSessionRequest, now time.Time) (session, *appError)
@@ -453,6 +456,44 @@ func (s *memoryStore) ListDevices(tenantID string) []device {
 	return items
 }
 
+func (s *memoryStore) GetDevice(deviceID string) (device, *appError) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	item, ok := s.devices[deviceID]
+	if !ok {
+		return device{}, &appError{HTTPStatus: http.StatusNotFound, Code: "device_offline", Message: "device not found"}
+	}
+	return item, nil
+}
+
+func (s *memoryStore) DisableDevice(deviceID string, now time.Time) (device, *appError) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	item, ok := s.devices[deviceID]
+	if !ok {
+		return device{}, &appError{HTTPStatus: http.StatusNotFound, Code: "device_offline", Message: "device not found"}
+	}
+	item.Status = "disabled"
+	s.devices[deviceID] = item
+	delete(s.deviceTokenHashes, deviceID)
+	return item, nil
+}
+
+func (s *memoryStore) RotateDeviceToken(deviceID string, now time.Time) (device, string, *appError) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	item, ok := s.devices[deviceID]
+	if !ok {
+		return device{}, "", &appError{HTTPStatus: http.StatusNotFound, Code: "device_offline", Message: "device not found"}
+	}
+	if item.Status == "disabled" {
+		return device{}, "", &appError{HTTPStatus: http.StatusForbidden, Code: "device_disabled", Message: "device is disabled"}
+	}
+	deviceToken := "dt_" + randomHex(24)
+	s.deviceTokenHashes[deviceID] = sha256Hex(deviceToken)
+	return item, deviceToken, nil
+}
+
 func (s *memoryStore) RegisterAgent(req registerAgentRequest, now time.Time) (device, string, *appError) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -492,6 +533,9 @@ func (s *memoryStore) CreateSession(req createAgentSessionRequest, now time.Time
 	deviceItem, ok := s.devices[req.DeviceID]
 	if !ok {
 		return session{}, &appError{HTTPStatus: http.StatusNotFound, Code: "device_offline", Message: "device not found"}
+	}
+	if deviceItem.Status == "disabled" {
+		return session{}, &appError{HTTPStatus: http.StatusForbidden, Code: "device_disabled", Message: "device is disabled"}
 	}
 
 	sessionID := randomUUID()
@@ -982,6 +1026,9 @@ func (s *memoryStore) MarkDeviceSeen(deviceID string, now time.Time) *appError {
 	if !ok {
 		return &appError{HTTPStatus: http.StatusNotFound, Code: "device_offline", Message: "device not found"}
 	}
+	if item.Status == "disabled" {
+		return &appError{HTTPStatus: http.StatusForbidden, Code: "device_disabled", Message: "device is disabled"}
+	}
 	item.Status = "active"
 	item.LastSeen = now.Format(time.RFC3339)
 	s.devices[deviceID] = item
@@ -1006,6 +1053,13 @@ func (s *memoryStore) ValidateDeviceToken(deviceID string, token string) *appErr
 	defer s.mu.Unlock()
 	if token == "" {
 		return &appError{HTTPStatus: http.StatusUnauthorized, Code: "device_token_invalid", Message: "device token is invalid"}
+	}
+	item, ok := s.devices[deviceID]
+	if !ok {
+		return &appError{HTTPStatus: http.StatusUnauthorized, Code: "device_token_invalid", Message: "device token is invalid"}
+	}
+	if item.Status == "disabled" {
+		return &appError{HTTPStatus: http.StatusForbidden, Code: "device_disabled", Message: "device is disabled"}
 	}
 	tokenHash, ok := s.deviceTokenHashes[deviceID]
 	if !ok || tokenHash != sha256Hex(token) {
@@ -1254,14 +1308,26 @@ func approvalScopedHandler(w http.ResponseWriter, r *http.Request) {
 
 func deviceScopedHandler(w http.ResponseWriter, r *http.Request) {
 	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/v1/devices/"), "/")
-	if len(parts) < 2 {
+	if len(parts) == 0 || parts[0] == "" {
 		http.NotFound(w, r)
 		return
 	}
 
 	deviceID := parts[0]
+	if len(parts) == 1 {
+		if r.Method == http.MethodGet {
+			getDeviceHandler(w, r, deviceID)
+			return
+		}
+		http.NotFound(w, r)
+		return
+	}
 	resource := parts[1]
 	switch {
+	case resource == "disable" && len(parts) == 2 && r.Method == http.MethodPost:
+		disableDeviceHandler(w, r, deviceID)
+	case resource == "rotate-token" && len(parts) == 2 && r.Method == http.MethodPost:
+		rotateDeviceTokenHandler(w, r, deviceID)
 	case resource == "sessions" && r.Method == http.MethodGet:
 		listDeviceSessionsHandler(w, r, deviceID)
 	case resource == "grants" && len(parts) == 2 && r.Method == http.MethodGet:
@@ -1273,6 +1339,85 @@ func deviceScopedHandler(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+func getDeviceHandler(w http.ResponseWriter, r *http.Request, deviceID string) {
+	item, appErr := store.GetDevice(deviceID)
+	if appErr != nil {
+		writeAppError(w, r, appErr)
+		return
+	}
+	writeJSON(w, envelope{
+		Data:      item,
+		RequestID: requestID(r),
+		TraceID:   traceID(r),
+	})
+}
+
+func disableDeviceHandler(w http.ResponseWriter, r *http.Request, deviceID string) {
+	if devRole(r) != "owner" && devRole(r) != "admin" {
+		writeError(w, r, http.StatusForbidden, "role_insufficient", "role cannot disable devices")
+		return
+	}
+	item, appErr := store.DisableDevice(deviceID, time.Now().UTC())
+	if appErr != nil {
+		writeAppError(w, r, appErr)
+		return
+	}
+	clientHub.broadcast(item.TenantID, newWSEnvelope("device.status_changed", traceID(r), map[string]any{
+		"tenant_id":    item.TenantID,
+		"device_id":    item.DeviceID,
+		"status":       item.Status,
+		"last_seen_at": item.LastSeen,
+	}))
+	store.AppendAuditLog(auditLog{
+		TenantID:     item.TenantID,
+		ActorType:    "user",
+		ActorID:      devUserID(r),
+		Action:       "device.disable",
+		ResourceType: "device",
+		ResourceID:   deviceID,
+		Result:       "success",
+		TraceID:      traceID(r),
+		Detail:       map[string]any{},
+	}, time.Now().UTC())
+	writeJSON(w, envelope{
+		Data:      item,
+		RequestID: requestID(r),
+		TraceID:   traceID(r),
+	})
+}
+
+func rotateDeviceTokenHandler(w http.ResponseWriter, r *http.Request, deviceID string) {
+	if devRole(r) != "owner" && devRole(r) != "admin" {
+		writeError(w, r, http.StatusForbidden, "role_insufficient", "role cannot rotate device tokens")
+		return
+	}
+	item, deviceToken, appErr := store.RotateDeviceToken(deviceID, time.Now().UTC())
+	if appErr != nil {
+		writeAppError(w, r, appErr)
+		return
+	}
+	store.AppendAuditLog(auditLog{
+		TenantID:     item.TenantID,
+		ActorType:    "user",
+		ActorID:      devUserID(r),
+		Action:       "device_token.rotate",
+		ResourceType: "device",
+		ResourceID:   deviceID,
+		Result:       "success",
+		TraceID:      traceID(r),
+		Detail:       map[string]any{},
+	}, time.Now().UTC())
+	writeJSON(w, envelope{
+		Data: map[string]string{
+			"device_id":    item.DeviceID,
+			"device_token": deviceToken,
+			"status":       item.Status,
+		},
+		RequestID: requestID(r),
+		TraceID:   traceID(r),
+	})
 }
 
 func healthHandler(w http.ResponseWriter, r *http.Request) {
