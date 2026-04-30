@@ -116,13 +116,20 @@ try {
 
     $final = Invoke-RestMethod -Uri "$serverURL/api/v1/tenants/$tenantId/approvals"
     $finalApproval = $final.data.items | Where-Object { $_.approval_id -eq $approval.approval_id } | Select-Object -First 1
+    $sessionId = $approval.session_id
+    $outputChunks = Invoke-RestMethod -Uri "$serverURL/api/v1/sessions/$sessionId/output-chunks"
+    if ($outputChunks.data.items.Count -lt 1) {
+        throw "agent run did not append output chunks"
+    }
 
     [pscustomobject]@{
         device_id = $registered.data.device_id
         approval_id = $approval.approval_id
+        session_id = $sessionId
         delivery_id = $decision.data.delivery_id
         final_status = $finalApproval.status
         delivery_status = $finalApproval.delivery_status
+        output_chunk_count = $outputChunks.data.items.Count
         ack_written = $true
     } | ConvertTo-Json
 } finally {

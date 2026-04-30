@@ -1,5 +1,6 @@
 DROP TABLE IF EXISTS audit_logs;
 DROP TABLE IF EXISTS http_idempotency_keys;
+DROP TABLE IF EXISTS output_chunks;
 DROP TABLE IF EXISTS approval_actions;
 DROP TABLE IF EXISTS approval_notifications;
 DROP TABLE IF EXISTS approval_deliveries;

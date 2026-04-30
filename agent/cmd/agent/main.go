@@ -114,6 +114,11 @@ func runManagedCLI(args []string) {
 		os.Exit(1)
 	}
 	sessionID := responseDataString(sessionResp, "session_id")
+	outputText := "GatePilot fake AI CLI\npermission_request: allow command execution? [approve/reject/reply]"
+	if err := appendOutputChunk(config.ServerURL, config.DeviceID, config.DeviceToken, sessionID, 1, "stdout", outputText); err != nil {
+		fmt.Fprintf(os.Stderr, "append managed output failed: %v\n", err)
+		os.Exit(1)
+	}
 
 	approvalBody := mustMarshal(map[string]any{
 		"device_id":          config.DeviceID,
@@ -600,6 +605,23 @@ func postJSONWithToken(url string, body []byte, token string) ([]byte, error) {
 	return respBody, nil
 }
 
+func appendOutputChunk(serverURL string, deviceID string, deviceToken string, sessionID string, sequenceNo int64, streamType string, content string) error {
+	payload := map[string]any{
+		"device_id":        deviceID,
+		"session_id":       sessionID,
+		"sequence_no":      sequenceNo,
+		"stream_type":      streamType,
+		"content_redacted": content,
+		"content_hash":     "sha256:" + sha256String(content),
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	_, err = postJSONWithToken(serverURL+"/api/v1/agent/output-chunks", body, deviceToken)
+	return err
+}
+
 func mustMarshal(value any) []byte {
 	body, err := json.Marshal(value)
 	if err != nil {
@@ -731,6 +753,11 @@ func stringValue(value *string) string {
 		return ""
 	}
 	return *value
+}
+
+func sha256String(value string) string {
+	sum := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(sum[:])
 }
 
 func getenv(key, fallback string) string {

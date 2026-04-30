@@ -157,6 +157,18 @@ CREATE TABLE IF NOT EXISTS approval_actions (
     created_at timestamptz NOT NULL DEFAULT now()
 );
 
+CREATE TABLE IF NOT EXISTS output_chunks (
+    id bigserial PRIMARY KEY,
+    tenant_id uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    session_id uuid NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    sequence_no bigint NOT NULL,
+    stream_type varchar(16) NOT NULL,
+    content_redacted text NOT NULL DEFAULT '',
+    content_hash varchar(128) NOT NULL DEFAULT '',
+    created_at timestamptz NOT NULL DEFAULT now(),
+    UNIQUE(session_id, sequence_no)
+);
+
 CREATE TABLE IF NOT EXISTS audit_logs (
     id bigserial PRIMARY KEY,
     tenant_id uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
@@ -192,6 +204,7 @@ CREATE INDEX IF NOT EXISTS idx_approvals_session_created ON approval_requests(se
 CREATE INDEX IF NOT EXISTS idx_approvals_waiting_expires ON approval_requests(expires_at) WHERE status = 'waiting_decision';
 CREATE UNIQUE INDEX IF NOT EXISTS idx_approvals_tenant_idempotency ON approval_requests(tenant_id, idempotency_key) WHERE idempotency_key <> '';
 CREATE UNIQUE INDEX IF NOT EXISTS idx_approval_actions_idempotency ON approval_actions(tenant_id, approval_id, idempotency_key) WHERE idempotency_key <> '';
+CREATE INDEX IF NOT EXISTS idx_output_chunks_session_sequence ON output_chunks(session_id, sequence_no DESC);
 CREATE INDEX IF NOT EXISTS idx_deliveries_device_status_retry ON approval_deliveries(device_id, status, next_attempt_at);
 CREATE INDEX IF NOT EXISTS idx_deliveries_approval_created ON approval_deliveries(approval_id, created_at DESC);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_notifications_approval_client ON approval_notifications(approval_id, client_instance_id);

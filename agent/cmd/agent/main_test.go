@@ -88,3 +88,11 @@ func TestApprovalIdempotencyKeyChangesWithStableInputs(t *testing.T) {
 		})
 	}
 }
+
+func TestSHA256String(t *testing.T) {
+	got := sha256String("GatePilot output ready")
+	want := "5ebdeb186e2c69d8384030b47254f8de4407fff2a694129e9d61008eb27c8ce1"
+	if got != want {
+		t.Fatalf("sha256String() = %q, want %q", got, want)
+	}
+}

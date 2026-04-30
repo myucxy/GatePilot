@@ -228,6 +228,10 @@ func pushApprovalUpdatedToClients(item approval) {
 	clientHub.broadcast(item.TenantID, approvalUpdatedEnvelope(item))
 }
 
+func pushSessionUpdatedToClients(item session) {
+	clientHub.broadcast(item.TenantID, sessionUpdatedEnvelope(item))
+}
+
 func pushPendingApprovalDecisions(agent *agentConnection) {
 	for _, item := range store.ListPendingDeliveries(agent.deviceID) {
 		if err := agent.writeJSON(approvalDecisionDeliverEnvelope(item)); err != nil {
@@ -268,6 +272,17 @@ func approvalUpdatedEnvelope(item approval) map[string]any {
 		"decided_by":       nullableMap(item.DecidedBy),
 		"decision_payload": nullableString(item.DecisionPayload),
 		"delivery_status":  nullableString(item.DeliveryStatus),
+	})
+}
+
+func sessionUpdatedEnvelope(item session) map[string]any {
+	return newWSEnvelope("session.updated", "tr_local", map[string]any{
+		"tenant_id":              item.TenantID,
+		"session_id":             item.SessionID,
+		"device_id":              item.DeviceID,
+		"status":                 item.Status,
+		"pending_approval_count": item.PendingApprovals,
+		"last_output_summary":    item.LastOutputSummary,
 	})
 }
 

@@ -487,6 +487,22 @@ func TestClientWebSocketReceivesApprovalCreatedAndUpdated(t *testing.T) {
 		t.Fatalf("created event = %+v, want approval %s", created, approvalID)
 	}
 
+	var sessionChanged struct {
+		Type    string `json:"type"`
+		Payload struct {
+			SessionID        string `json:"session_id"`
+			Status           string `json:"status"`
+			PendingApprovals int    `json:"pending_approval_count"`
+		} `json:"payload"`
+	}
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if err := conn.ReadJSON(&sessionChanged); err != nil {
+		t.Fatal(err)
+	}
+	if sessionChanged.Type != "session.updated" || sessionChanged.Payload.SessionID != sessionID || sessionChanged.Payload.Status != "waiting_approval" || sessionChanged.Payload.PendingApprovals != 1 {
+		t.Fatalf("session changed event = %+v, want waiting_approval for session %s", sessionChanged, sessionID)
+	}
+
 	postJSONWithHeaders(t, server.URL+"/api/v1/approvals/"+approvalID+"/decision", map[string]any{
 		"decision_type": "approve",
 		"payload":       "",
@@ -509,6 +525,81 @@ func TestClientWebSocketReceivesApprovalCreatedAndUpdated(t *testing.T) {
 	}
 	if updated.Type != "approval.updated" || updated.Payload.ApprovalID != approvalID || updated.Payload.Status != "delivering" || updated.Payload.DecisionType != "approve" {
 		t.Fatalf("updated event = %+v, want delivering approve for approval %s", updated, approvalID)
+	}
+}
+
+func TestOutputChunksAppendListAndUpdateSessionSummary(t *testing.T) {
+	resetTestStore()
+	server := httptest.NewServer(newRouter())
+	defer server.Close()
+
+	code := createTestActivationCode(t, server.URL)
+	deviceID := registerTestDevice(t, server.URL, code)
+	sessionID := createTestSession(t, server.URL, deviceID)
+
+	chunk := postJSON(t, server.URL+"/api/v1/agent/output-chunks", map[string]any{
+		"device_id":        deviceID,
+		"session_id":       sessionID,
+		"sequence_no":      1,
+		"stream_type":      "stdout",
+		"content_redacted": "GatePilot output ready",
+		"content_hash":     "sha256:test-output",
+	}, http.StatusCreated)
+	if got := dataString(t, chunk, "content_redacted"); got != "GatePilot output ready" {
+		t.Fatalf("chunk content = %q, want output", got)
+	}
+
+	body := getJSON(t, server.URL+"/api/v1/sessions/"+sessionID+"/output-chunks", http.StatusOK)
+	items := dataItems(t, body)
+	if len(items) != 1 || items[0]["sequence_no"] != float64(1) {
+		t.Fatalf("output chunks = %v, want sequence 1", items)
+	}
+	sessionDetail := getJSON(t, server.URL+"/api/v1/sessions/"+sessionID, http.StatusOK)
+	if got := dataString(t, sessionDetail, "last_output_summary"); got != "GatePilot output ready" {
+		t.Fatalf("last output summary = %q, want chunk content", got)
+	}
+}
+
+func TestDeviceGrantListAndRevoke(t *testing.T) {
+	resetTestStore()
+	server := httptest.NewServer(newRouter())
+	defer server.Close()
+
+	code := createTestActivationCode(t, server.URL)
+	deviceID := registerTestDevice(t, server.URL, code)
+	approverID := "00000000-0000-0000-0000-000000000099"
+
+	grant := postJSON(t, server.URL+"/api/v1/devices/"+deviceID+"/grants", map[string]any{
+		"user_id":    approverID,
+		"permission": "approve",
+	}, http.StatusCreated)
+	grantID := dataString(t, grant, "grant_id")
+
+	list := getJSON(t, server.URL+"/api/v1/devices/"+deviceID+"/grants", http.StatusOK)
+	items := dataItems(t, list)
+	if len(items) != 1 || items[0]["grant_id"] != grantID {
+		t.Fatalf("device grants = %v, want grant %s", items, grantID)
+	}
+
+	deleteJSON(t, server.URL+"/api/v1/devices/"+deviceID+"/grants/"+grantID, http.StatusOK)
+	list = getJSON(t, server.URL+"/api/v1/devices/"+deviceID+"/grants", http.StatusOK)
+	if items := dataItems(t, list); len(items) != 0 {
+		t.Fatalf("device grants after revoke = %v, want empty", items)
+	}
+
+	sessionID := createTestSession(t, server.URL, deviceID)
+	approvalID := createTestApproval(t, server.URL, deviceID, sessionID)
+	body := postJSONWithHeaders(t, server.URL+"/api/v1/approvals/"+approvalID+"/decision", map[string]any{
+		"decision_type": "approve",
+		"payload":       "",
+	}, map[string]string{
+		"Idempotency-Key": randomUUID(),
+		"X-Dev-Role":      "approver",
+		"X-Dev-User-Id":   approverID,
+	}, http.StatusForbidden)
+	errorBody, ok := body["error"].(map[string]any)
+	if !ok || errorBody["code"] != "device_access_denied" {
+		t.Fatalf("error code = %v, want device_access_denied", body)
 	}
 }
 
@@ -866,6 +957,20 @@ func postJSONWithHeaders(t *testing.T, url string, payload map[string]any, heade
 		}
 	}
 
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	return decodeJSONResponse(t, resp, wantStatus)
+}
+
+func deleteJSON(t *testing.T, url string, wantStatus int) map[string]any {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodDelete, url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)

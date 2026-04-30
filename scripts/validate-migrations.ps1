@@ -29,6 +29,7 @@ $requiredTables = @(
     "approval_deliveries",
     "approval_notifications",
     "approval_actions",
+    "output_chunks",
     "audit_logs",
     "http_idempotency_keys"
 )

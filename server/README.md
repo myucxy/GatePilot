@@ -22,13 +22,17 @@ Endpoints:
 - `POST /api/v1/client-instances`
 - `POST /api/v1/tenants/{tenant_id}/device-activation-codes`
 - `GET /api/v1/tenants/{tenant_id}/devices`
+- `GET /api/v1/devices/{device_id}/grants`
 - `POST /api/v1/devices/{device_id}/grants`
+- `DELETE /api/v1/devices/{device_id}/grants/{grant_id}`
 - `POST /api/v1/agent/register`
 - `POST /api/v1/agent/sessions`
 - `GET /api/v1/devices/{device_id}/sessions`
 - `GET /api/v1/sessions/{session_id}`
+- `GET /api/v1/sessions/{session_id}/output-chunks`
 - `POST /api/v1/agent/approvals`
 - `POST /api/v1/agent/approval-acks`
+- `POST /api/v1/agent/output-chunks`
 - `GET /ws/agent`
 - `GET /ws/client`
 - `GET /api/v1/tenants/{tenant_id}/approvals`

@@ -262,6 +262,32 @@ paths:
           $ref: "#/components/responses/ErrorResponse"
         "409":
           $ref: "#/components/responses/ErrorResponse"
+  /agent/output-chunks:
+    post:
+      operationId: appendAgentOutputChunk
+      summary: Append redacted CLI output reported by Agent
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateOutputChunkRequest"
+      responses:
+        "201":
+          description: Output chunk appended
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/OutputChunk"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
   /devices/{device_id}/sessions:
     get:
       operationId: listDeviceSessions
@@ -311,7 +337,53 @@ paths:
                         $ref: "#/components/schemas/Session"
         "404":
           $ref: "#/components/responses/ErrorResponse"
+  /sessions/{session_id}/output-chunks:
+    get:
+      operationId: listSessionOutputChunks
+      summary: List redacted CLI output chunks for a session
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Output chunks
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/OutputChunkListResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
   /devices/{device_id}/grants:
+    get:
+      operationId: listDeviceGrants
+      summary: List active grants for a device
+      parameters:
+        - name: device_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Device grants
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/DeviceGrantListResponse"
     post:
       operationId: createDeviceGrant
       summary: Grant a user access to a device
@@ -330,6 +402,38 @@ paths:
       responses:
         "201":
           description: Device grant created
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/DeviceGrant"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+  /devices/{device_id}/grants/{grant_id}:
+    delete:
+      operationId: revokeDeviceGrant
+      summary: Revoke a device grant
+      parameters:
+        - name: device_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: grant_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Device grant revoked
           content:
             application/json:
               schema:
@@ -826,6 +930,86 @@ components:
           nullable: true
         has_more:
           type: boolean
+    CreateOutputChunkRequest:
+      type: object
+      required:
+        - device_id
+        - session_id
+        - sequence_no
+        - stream_type
+        - content_redacted
+        - content_hash
+      properties:
+        device_id:
+          type: string
+          format: uuid
+        session_id:
+          type: string
+          format: uuid
+        sequence_no:
+          type: integer
+          minimum: 1
+        stream_type:
+          type: string
+          enum:
+            - stdout
+            - stderr
+            - system
+        content_redacted:
+          type: string
+        content_hash:
+          type: string
+    OutputChunk:
+      type: object
+      required:
+        - chunk_id
+        - tenant_id
+        - session_id
+        - sequence_no
+        - stream_type
+        - content_redacted
+        - content_hash
+        - created_at
+      properties:
+        chunk_id:
+          type: integer
+        tenant_id:
+          type: string
+          format: uuid
+        session_id:
+          type: string
+          format: uuid
+        sequence_no:
+          type: integer
+        stream_type:
+          type: string
+          enum:
+            - stdout
+            - stderr
+            - system
+        content_redacted:
+          type: string
+        content_hash:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+    OutputChunkListResponse:
+      type: object
+      required:
+        - items
+        - next_cursor
+        - has_more
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/OutputChunk"
+        next_cursor:
+          type: string
+          nullable: true
+        has_more:
+          type: boolean
     CreateAgentApprovalRequest:
       type: object
       required:
@@ -990,6 +1174,25 @@ components:
         created_at:
           type: string
           format: date-time
+        revoked_at:
+          type: string
+          format: date-time
+    DeviceGrantListResponse:
+      type: object
+      required:
+        - items
+        - next_cursor
+        - has_more
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/DeviceGrant"
+        next_cursor:
+          type: string
+          nullable: true
+        has_more:
+          type: boolean
     SubmitApprovalDecisionResponse:
       type: object
       required:

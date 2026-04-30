@@ -707,6 +707,69 @@ RETURNING id::text, created_at`,
 	return item, nil
 }
 
+func (s *postgresStore) ListDeviceGrants(deviceID string) []deviceGrant {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	rows, err := s.db.QueryContext(ctx, `
+SELECT id::text, tenant_id::text, device_id::text, user_id::text, permission, granted_by_user_id::text, created_at, revoked_at
+FROM device_grants
+WHERE device_id = $1 AND revoked_at IS NULL
+ORDER BY created_at DESC`, deviceID)
+	if err != nil {
+		return []deviceGrant{}
+	}
+	defer rows.Close()
+	items := []deviceGrant{}
+	for rows.Next() {
+		item, err := scanDeviceGrant(rows)
+		if err != nil {
+			return []deviceGrant{}
+		}
+		items = append(items, item)
+	}
+	return items
+}
+
+func (s *postgresStore) RevokeDeviceGrant(deviceID string, grantID string, revokedBy string, now time.Time) (deviceGrant, *appError) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return deviceGrant{}, internalStoreError(err)
+	}
+	defer tx.Rollback()
+
+	var tenantID string
+	err = tx.QueryRowContext(ctx, "SELECT tenant_id::text FROM devices WHERE id = $1", deviceID).Scan(&tenantID)
+	if err == sql.ErrNoRows {
+		return deviceGrant{}, &appError{HTTPStatus: http.StatusNotFound, Code: "device_offline", Message: "device not found"}
+	}
+	if err != nil {
+		return deviceGrant{}, internalStoreError(err)
+	}
+
+	row := tx.QueryRowContext(ctx, `
+UPDATE device_grants
+SET revoked_at = COALESCE(revoked_at, $1)
+WHERE id = $2 AND device_id = $3
+RETURNING id::text, tenant_id::text, device_id::text, user_id::text, permission, granted_by_user_id::text, created_at, revoked_at`,
+		now, grantID, deviceID)
+	item, err := scanDeviceGrant(row)
+	if err == sql.ErrNoRows {
+		return deviceGrant{}, &appError{HTTPStatus: http.StatusNotFound, Code: "device_grant_not_found", Message: "device grant not found"}
+	}
+	if err != nil {
+		return deviceGrant{}, internalStoreError(err)
+	}
+	if item.TenantID == "" {
+		item.TenantID = tenantID
+	}
+	if err := tx.Commit(); err != nil {
+		return deviceGrant{}, internalStoreError(err)
+	}
+	return item, nil
+}
+
 func (s *postgresStore) CanApproveDevice(tenantID string, deviceID string, userID string) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -939,6 +1002,103 @@ ORDER BY started_at DESC`, deviceID)
 	return items
 }
 
+func (s *postgresStore) AppendOutputChunk(req createOutputChunkRequest, now time.Time) (outputChunk, *appError) {
+	if req.SessionID == "" || req.DeviceID == "" || req.SequenceNo <= 0 {
+		return outputChunk{}, &appError{HTTPStatus: http.StatusBadRequest, Code: "message_schema_invalid", Message: "device_id, session_id, and positive sequence_no are required"}
+	}
+	if req.StreamType == "" {
+		req.StreamType = "stdout"
+	}
+	switch req.StreamType {
+	case "stdout", "stderr", "system":
+	default:
+		return outputChunk{}, &appError{HTTPStatus: http.StatusBadRequest, Code: "message_schema_invalid", Message: "stream_type must be stdout, stderr, or system"}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return outputChunk{}, internalStoreError(err)
+	}
+	defer tx.Rollback()
+
+	var tenantID string
+	err = tx.QueryRowContext(ctx, `
+SELECT tenant_id::text
+FROM sessions
+WHERE id = $1 AND device_id = $2
+FOR UPDATE`, req.SessionID, req.DeviceID).Scan(&tenantID)
+	if err == sql.ErrNoRows {
+		return outputChunk{}, &appError{HTTPStatus: http.StatusNotFound, Code: "agent_session_not_found", Message: "session not found"}
+	}
+	if err != nil {
+		return outputChunk{}, internalStoreError(err)
+	}
+
+	var existing outputChunk
+	var existingCreatedAt time.Time
+	err = tx.QueryRowContext(ctx, `
+SELECT id, tenant_id::text, session_id::text, sequence_no, stream_type, content_redacted, content_hash, created_at
+FROM output_chunks
+WHERE session_id = $1 AND sequence_no = $2`, req.SessionID, req.SequenceNo).
+		Scan(&existing.ChunkID, &existing.TenantID, &existing.SessionID, &existing.SequenceNo, &existing.StreamType, &existing.ContentRedacted, &existing.ContentHash, &existingCreatedAt)
+	if err == nil {
+		if existing.StreamType != req.StreamType || existing.ContentRedacted != req.ContentRedacted || existing.ContentHash != req.ContentHash {
+			return outputChunk{}, &appError{HTTPStatus: http.StatusConflict, Code: "output_chunk_conflict", Message: "sequence_no already exists with different content"}
+		}
+		existing.CreatedAt = existingCreatedAt.Format(time.RFC3339)
+		return existing, nil
+	}
+	if err != sql.ErrNoRows {
+		return outputChunk{}, internalStoreError(err)
+	}
+
+	row := tx.QueryRowContext(ctx, `
+INSERT INTO output_chunks(tenant_id, session_id, sequence_no, stream_type, content_redacted, content_hash, created_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
+RETURNING id, tenant_id::text, session_id::text, sequence_no, stream_type, content_redacted, content_hash, created_at`,
+		tenantID, req.SessionID, req.SequenceNo, req.StreamType, req.ContentRedacted, req.ContentHash, now)
+	item, err := scanOutputChunk(row)
+	if err != nil {
+		return outputChunk{}, internalStoreError(err)
+	}
+	_, err = tx.ExecContext(ctx, `
+UPDATE sessions
+SET last_output_summary = $1
+WHERE id = $2`, summarizeOutput(req.ContentRedacted), req.SessionID)
+	if err != nil {
+		return outputChunk{}, internalStoreError(err)
+	}
+	if err := tx.Commit(); err != nil {
+		return outputChunk{}, internalStoreError(err)
+	}
+	return item, nil
+}
+
+func (s *postgresStore) ListOutputChunks(sessionID string) []outputChunk {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	rows, err := s.db.QueryContext(ctx, `
+SELECT id, tenant_id::text, session_id::text, sequence_no, stream_type, content_redacted, content_hash, created_at
+FROM output_chunks
+WHERE session_id = $1
+ORDER BY sequence_no ASC`, sessionID)
+	if err != nil {
+		return []outputChunk{}
+	}
+	defer rows.Close()
+	items := []outputChunk{}
+	for rows.Next() {
+		item, err := scanOutputChunk(rows)
+		if err != nil {
+			return []outputChunk{}
+		}
+		items = append(items, item)
+	}
+	return items
+}
+
 func (s *postgresStore) MarkDeviceSeen(deviceID string, now time.Time) *appError {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -1131,6 +1291,14 @@ type approvalScanner interface {
 	Scan(dest ...any) error
 }
 
+type deviceGrantScanner interface {
+	Scan(dest ...any) error
+}
+
+type outputChunkScanner interface {
+	Scan(dest ...any) error
+}
+
 func scanApproval(scanner approvalScanner) (approval, error) {
 	var item approval
 	var decidedByJSON string
@@ -1153,6 +1321,32 @@ func scanApproval(scanner approvalScanner) (approval, error) {
 	}
 	item.CreatedAt = createdAt.Format(time.RFC3339)
 	item.ExpiresAt = expiresAt.Format(time.RFC3339)
+	return item, nil
+}
+
+func scanDeviceGrant(scanner deviceGrantScanner) (deviceGrant, error) {
+	var item deviceGrant
+	var createdAt time.Time
+	var revokedAt sql.NullTime
+	err := scanner.Scan(&item.GrantID, &item.TenantID, &item.DeviceID, &item.UserID, &item.Permission, &item.GrantedBy, &createdAt, &revokedAt)
+	if err != nil {
+		return deviceGrant{}, err
+	}
+	item.CreatedAt = createdAt.Format(time.RFC3339)
+	if revokedAt.Valid {
+		item.RevokedAt = revokedAt.Time.Format(time.RFC3339)
+	}
+	return item, nil
+}
+
+func scanOutputChunk(scanner outputChunkScanner) (outputChunk, error) {
+	var item outputChunk
+	var createdAt time.Time
+	err := scanner.Scan(&item.ChunkID, &item.TenantID, &item.SessionID, &item.SequenceNo, &item.StreamType, &item.ContentRedacted, &item.ContentHash, &createdAt)
+	if err != nil {
+		return outputChunk{}, err
+	}
+	item.CreatedAt = createdAt.Format(time.RFC3339)
 	return item, nil
 }
 

@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -130,6 +131,17 @@ type auditLog struct {
 	CreatedAt    string         `json:"created_at"`
 }
 
+type outputChunk struct {
+	ChunkID         int64  `json:"chunk_id"`
+	TenantID        string `json:"tenant_id"`
+	SessionID       string `json:"session_id"`
+	SequenceNo      int64  `json:"sequence_no"`
+	StreamType      string `json:"stream_type"`
+	ContentRedacted string `json:"content_redacted"`
+	ContentHash     string `json:"content_hash"`
+	CreatedAt       string `json:"created_at"`
+}
+
 type createActivationCodeRequest struct {
 	Name             string `json:"name"`
 	ExpiresInSeconds int    `json:"expires_in_seconds"`
@@ -198,6 +210,15 @@ type registerPushTokenRequest struct {
 	Token    string `json:"token"`
 }
 
+type createOutputChunkRequest struct {
+	DeviceID        string `json:"device_id"`
+	SessionID       string `json:"session_id"`
+	SequenceNo      int64  `json:"sequence_no"`
+	StreamType      string `json:"stream_type"`
+	ContentRedacted string `json:"content_redacted"`
+	ContentHash     string `json:"content_hash"`
+}
+
 type appError struct {
 	HTTPStatus int
 	Code       string
@@ -216,6 +237,8 @@ type gatePilotStore interface {
 	SubmitApprovalDecision(approvalID string, req submitApprovalDecisionRequest, idempotencyKey string, decidedBy map[string]string, now time.Time) (approval, *appError)
 	AckApprovalDecision(req ackApprovalDecisionRequest) (map[string]any, *appError)
 	CreateDeviceGrant(deviceID string, req createDeviceGrantRequest, grantedBy string, now time.Time) (deviceGrant, *appError)
+	ListDeviceGrants(deviceID string) []deviceGrant
+	RevokeDeviceGrant(deviceID string, grantID string, revokedBy string, now time.Time) (deviceGrant, *appError)
 	CanApproveDevice(tenantID string, deviceID string, userID string) bool
 	RegisterPushToken(clientInstanceID string, req registerPushTokenRequest, now time.Time) (clientInstance, *appError)
 	ExpireApprovals(now time.Time) []approval
@@ -224,6 +247,8 @@ type gatePilotStore interface {
 	ListAuditLogs(tenantID string) []auditLog
 	GetSession(sessionID string) (session, *appError)
 	ListDeviceSessions(deviceID string) []session
+	AppendOutputChunk(req createOutputChunkRequest, now time.Time) (outputChunk, *appError)
+	ListOutputChunks(sessionID string) []outputChunk
 	MarkDeviceSeen(deviceID string, now time.Time) *appError
 	MarkClientInstanceSeen(clientInstanceID string, now time.Time) *appError
 	ValidateDeviceToken(deviceID string, token string) *appError
@@ -242,6 +267,8 @@ type memoryStore struct {
 	approvalNotifications    map[string][]string
 	deviceGrants             map[string]deviceGrant
 	auditLogs                []auditLog
+	outputChunks             map[string]map[int64]outputChunk
+	nextOutputChunkID        int64
 	devices                  map[string]device
 	sessions                 map[string]session
 	approvals                map[string]approval
@@ -260,6 +287,8 @@ func newMemoryStore() *memoryStore {
 		approvalNotifications:    map[string][]string{},
 		deviceGrants:             map[string]deviceGrant{},
 		auditLogs:                []auditLog{},
+		outputChunks:             map[string]map[int64]outputChunk{},
+		nextOutputChunkID:        1,
 		devices:                  map[string]device{},
 		sessions:                 map[string]session{},
 		approvals:                map[string]approval{},
@@ -278,6 +307,8 @@ func (s *memoryStore) Reset() {
 	s.approvalNotifications = map[string][]string{}
 	s.deviceGrants = map[string]deviceGrant{}
 	s.auditLogs = []auditLog{}
+	s.outputChunks = map[string]map[int64]outputChunk{}
+	s.nextOutputChunkID = 1
 	s.devices = map[string]device{}
 	s.sessions = map[string]session{}
 	s.approvals = map[string]approval{}
@@ -664,6 +695,39 @@ func (s *memoryStore) CreateDeviceGrant(deviceID string, req createDeviceGrantRe
 	return item, nil
 }
 
+func (s *memoryStore) ListDeviceGrants(deviceID string) []deviceGrant {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	items := []deviceGrant{}
+	for _, grant := range s.deviceGrants {
+		if grant.DeviceID == deviceID && grant.RevokedAt == "" {
+			items = append(items, grant)
+		}
+	}
+	sort.Slice(items, func(i, j int) bool {
+		return items[i].CreatedAt > items[j].CreatedAt
+	})
+	return items
+}
+
+func (s *memoryStore) RevokeDeviceGrant(deviceID string, grantID string, revokedBy string, now time.Time) (deviceGrant, *appError) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.devices[deviceID]; !ok {
+		return deviceGrant{}, &appError{HTTPStatus: http.StatusNotFound, Code: "device_offline", Message: "device not found"}
+	}
+	for key, grant := range s.deviceGrants {
+		if grant.DeviceID == deviceID && grant.GrantID == grantID {
+			if grant.RevokedAt == "" {
+				grant.RevokedAt = now.Format(time.RFC3339)
+				s.deviceGrants[key] = grant
+			}
+			return grant, nil
+		}
+	}
+	return deviceGrant{}, &appError{HTTPStatus: http.StatusNotFound, Code: "device_grant_not_found", Message: "device grant not found"}
+}
+
 func (s *memoryStore) CanApproveDevice(tenantID string, deviceID string, userID string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -789,6 +853,65 @@ func (s *memoryStore) ListDeviceSessions(deviceID string) []session {
 	return items
 }
 
+func (s *memoryStore) AppendOutputChunk(req createOutputChunkRequest, now time.Time) (outputChunk, *appError) {
+	if req.SessionID == "" || req.DeviceID == "" || req.SequenceNo <= 0 {
+		return outputChunk{}, &appError{HTTPStatus: http.StatusBadRequest, Code: "message_schema_invalid", Message: "device_id, session_id, and positive sequence_no are required"}
+	}
+	if req.StreamType == "" {
+		req.StreamType = "stdout"
+	}
+	switch req.StreamType {
+	case "stdout", "stderr", "system":
+	default:
+		return outputChunk{}, &appError{HTTPStatus: http.StatusBadRequest, Code: "message_schema_invalid", Message: "stream_type must be stdout, stderr, or system"}
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sessionItem, ok := s.sessions[req.SessionID]
+	if !ok || sessionItem.DeviceID != req.DeviceID {
+		return outputChunk{}, &appError{HTTPStatus: http.StatusNotFound, Code: "agent_session_not_found", Message: "session not found"}
+	}
+	if s.outputChunks[req.SessionID] == nil {
+		s.outputChunks[req.SessionID] = map[int64]outputChunk{}
+	}
+	if existing, ok := s.outputChunks[req.SessionID][req.SequenceNo]; ok {
+		if existing.StreamType != req.StreamType || existing.ContentRedacted != req.ContentRedacted || existing.ContentHash != req.ContentHash {
+			return outputChunk{}, &appError{HTTPStatus: http.StatusConflict, Code: "output_chunk_conflict", Message: "sequence_no already exists with different content"}
+		}
+		return existing, nil
+	}
+	item := outputChunk{
+		ChunkID:         s.nextOutputChunkID,
+		TenantID:        sessionItem.TenantID,
+		SessionID:       req.SessionID,
+		SequenceNo:      req.SequenceNo,
+		StreamType:      req.StreamType,
+		ContentRedacted: req.ContentRedacted,
+		ContentHash:     req.ContentHash,
+		CreatedAt:       now.Format(time.RFC3339),
+	}
+	s.nextOutputChunkID++
+	s.outputChunks[req.SessionID][req.SequenceNo] = item
+	sessionItem.LastOutputSummary = summarizeOutput(req.ContentRedacted)
+	s.sessions[req.SessionID] = sessionItem
+	return item, nil
+}
+
+func (s *memoryStore) ListOutputChunks(sessionID string) []outputChunk {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	itemsBySequence := s.outputChunks[sessionID]
+	items := make([]outputChunk, 0, len(itemsBySequence))
+	for _, item := range itemsBySequence {
+		items = append(items, item)
+	}
+	sort.Slice(items, func(i, j int) bool {
+		return items[i].SequenceNo < items[j].SequenceNo
+	})
+	return items
+}
+
 func (s *memoryStore) MarkDeviceSeen(deviceID string, now time.Time) *appError {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -900,6 +1023,7 @@ func newRouter() http.Handler {
 	mux.HandleFunc("/api/v1/agent/sessions", agentSessionsHandler)
 	mux.HandleFunc("/api/v1/agent/approvals", agentApprovalsHandler)
 	mux.HandleFunc("/api/v1/agent/approval-acks", agentApprovalAcksHandler)
+	mux.HandleFunc("/api/v1/agent/output-chunks", agentOutputChunksHandler)
 	mux.HandleFunc("/api/v1/approvals/", approvalScopedHandler)
 	mux.HandleFunc("/api/v1/devices/", deviceScopedHandler)
 	mux.HandleFunc("/api/v1/sessions/", sessionScopedHandler)
@@ -911,25 +1035,30 @@ func newRouter() http.Handler {
 }
 
 func sessionScopedHandler(w http.ResponseWriter, r *http.Request) {
-	sessionID := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/v1/sessions/"), "/")
-	if sessionID == "" || strings.Contains(sessionID, "/") {
+	parts := strings.Split(strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/v1/sessions/"), "/"), "/")
+	if len(parts) == 0 || parts[0] == "" {
 		http.NotFound(w, r)
 		return
 	}
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	sessionID := parts[0]
+	switch {
+	case len(parts) == 1 && r.Method == http.MethodGet:
+		item, appErr := store.GetSession(sessionID)
+		if appErr != nil {
+			writeAppError(w, r, appErr)
+			return
+		}
+		writeJSON(w, envelope{
+			Data:      item,
+			RequestID: requestID(r),
+			TraceID:   traceID(r),
+		})
+	case len(parts) == 2 && parts[1] == "output-chunks" && r.Method == http.MethodGet:
+		listOutputChunksHandler(w, r, sessionID)
+	default:
+		http.NotFound(w, r)
 		return
 	}
-	item, appErr := store.GetSession(sessionID)
-	if appErr != nil {
-		writeAppError(w, r, appErr)
-		return
-	}
-	writeJSON(w, envelope{
-		Data:      item,
-		RequestID: requestID(r),
-		TraceID:   traceID(r),
-	})
 }
 
 func startWorkersFromEnv() {
@@ -956,6 +1085,9 @@ func runExpiryWorkerOnce() {
 	for _, item := range store.ExpireApprovals(time.Now().UTC()) {
 		pushApprovalDecisionToAgent(item)
 		pushApprovalUpdatedToClients(item)
+		if sessionItem, appErr := store.GetSession(item.SessionID); appErr == nil {
+			pushSessionUpdatedToClients(sessionItem)
+		}
 	}
 	offlineAfter := 3 * time.Minute
 	if value := os.Getenv("GATEPILOT_DEVICE_OFFLINE_SECONDS"); value != "" {
@@ -1065,8 +1197,12 @@ func deviceScopedHandler(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case resource == "sessions" && r.Method == http.MethodGet:
 		listDeviceSessionsHandler(w, r, deviceID)
+	case resource == "grants" && len(parts) == 2 && r.Method == http.MethodGet:
+		listDeviceGrantsHandler(w, r, deviceID)
 	case resource == "grants" && r.Method == http.MethodPost:
 		createDeviceGrantHandler(w, r, deviceID)
+	case resource == "grants" && len(parts) == 3 && r.Method == http.MethodDelete:
+		revokeDeviceGrantHandler(w, r, deviceID, parts[2])
 	default:
 		http.NotFound(w, r)
 	}
@@ -1248,6 +1384,9 @@ func agentApprovalsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	pushApprovalCreatedToClients(item)
+	if sessionItem, appErr := store.GetSession(item.SessionID); appErr == nil {
+		pushSessionUpdatedToClients(sessionItem)
+	}
 
 	writeStatusJSON(w, http.StatusCreated, envelope{
 		Data:      item,
@@ -1316,6 +1455,9 @@ func submitApprovalDecisionHandler(w http.ResponseWriter, r *http.Request, appro
 	}
 	pushApprovalDecisionToAgent(item)
 	pushApprovalUpdatedToClients(item)
+	if sessionItem, appErr := store.GetSession(item.SessionID); appErr == nil {
+		pushSessionUpdatedToClients(sessionItem)
+	}
 	store.AppendAuditLog(auditLog{
 		TenantID:     item.TenantID,
 		ActorType:    decidedBy["actor_type"],
@@ -1393,6 +1535,54 @@ func createDeviceGrantHandler(w http.ResponseWriter, r *http.Request, deviceID s
 	})
 }
 
+func listDeviceGrantsHandler(w http.ResponseWriter, r *http.Request, deviceID string) {
+	if devRole(r) != "owner" && devRole(r) != "admin" {
+		writeError(w, r, http.StatusForbidden, "role_insufficient", "role cannot view device grants")
+		return
+	}
+	writeJSON(w, envelope{
+		Data: map[string]any{
+			"items":       store.ListDeviceGrants(deviceID),
+			"next_cursor": nil,
+			"has_more":    false,
+		},
+		RequestID: requestID(r),
+		TraceID:   traceID(r),
+	})
+}
+
+func revokeDeviceGrantHandler(w http.ResponseWriter, r *http.Request, deviceID string, grantID string) {
+	if devRole(r) != "owner" && devRole(r) != "admin" {
+		writeError(w, r, http.StatusForbidden, "role_insufficient", "role cannot manage device grants")
+		return
+	}
+	item, appErr := store.RevokeDeviceGrant(deviceID, grantID, devUserID(r), time.Now().UTC())
+	if appErr != nil {
+		writeAppError(w, r, appErr)
+		return
+	}
+	store.AppendAuditLog(auditLog{
+		TenantID:     item.TenantID,
+		ActorType:    "user",
+		ActorID:      devUserID(r),
+		Action:       "device_grant.revoke",
+		ResourceType: "device",
+		ResourceID:   deviceID,
+		Result:       "success",
+		TraceID:      traceID(r),
+		Detail: map[string]any{
+			"grant_id":   item.GrantID,
+			"user_id":    item.UserID,
+			"permission": item.Permission,
+		},
+	}, time.Now().UTC())
+	writeJSON(w, envelope{
+		Data:      item,
+		RequestID: requestID(r),
+		TraceID:   traceID(r),
+	})
+}
+
 func devRole(r *http.Request) string {
 	role := r.Header.Get("X-Dev-Role")
 	switch role {
@@ -1436,6 +1626,9 @@ func agentApprovalAcksHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	if item, appErr := store.GetApproval(req.ApprovalID); appErr == nil {
 		pushApprovalUpdatedToClients(item)
+		if sessionItem, appErr := store.GetSession(item.SessionID); appErr == nil {
+			pushSessionUpdatedToClients(sessionItem)
+		}
 		store.AppendAuditLog(auditLog{
 			TenantID:     item.TenantID,
 			ActorType:    "device",
@@ -1463,6 +1656,51 @@ func listDeviceSessionsHandler(w http.ResponseWriter, r *http.Request, deviceID 
 	writeJSON(w, envelope{
 		Data: map[string]any{
 			"items":       store.ListDeviceSessions(deviceID),
+			"next_cursor": nil,
+			"has_more":    false,
+		},
+		RequestID: requestID(r),
+		TraceID:   traceID(r),
+	})
+}
+
+func agentOutputChunksHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req createOutputChunkRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, r, http.StatusBadRequest, "message_schema_invalid", err.Error())
+		return
+	}
+	if appErr := store.ValidateDeviceToken(req.DeviceID, bearerToken(r)); appErr != nil {
+		writeAppError(w, r, appErr)
+		return
+	}
+	item, appErr := store.AppendOutputChunk(req, time.Now().UTC())
+	if appErr != nil {
+		writeAppError(w, r, appErr)
+		return
+	}
+	if sessionItem, appErr := store.GetSession(req.SessionID); appErr == nil {
+		pushSessionUpdatedToClients(sessionItem)
+	}
+	writeStatusJSON(w, http.StatusCreated, envelope{
+		Data:      item,
+		RequestID: requestID(r),
+		TraceID:   traceID(r),
+	})
+}
+
+func listOutputChunksHandler(w http.ResponseWriter, r *http.Request, sessionID string) {
+	if _, appErr := store.GetSession(sessionID); appErr != nil {
+		writeAppError(w, r, appErr)
+		return
+	}
+	writeJSON(w, envelope{
+		Data: map[string]any{
+			"items":       store.ListOutputChunks(sessionID),
 			"next_cursor": nil,
 			"has_more":    false,
 		},
@@ -1574,4 +1812,15 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func summarizeOutput(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "output chunk received"
+	}
+	if len(value) <= 160 {
+		return value
+	}
+	return value[:160]
 }

@@ -123,37 +123,53 @@ type Approval = {
 };
 
 type AuditLog = {
-  audit_id: number;
-  actor_type: string;
-  actor_id: string;
+	audit_id: number;
+	actor_type: string;
+	actor_id: string;
   action: string;
   resource_type: string;
   resource_id: string;
   result: string;
   trace_id: string;
-  created_at: string;
+	created_at: string;
+};
+
+type OutputChunk = {
+	chunk_id: number;
+	session_id: string;
+	sequence_no: number;
+	stream_type: string;
+	content_redacted: string;
+	created_at: string;
 };
 
 function App() {
-  const [language, setLanguage] = useState<Language>("zh");
-  const [activationCode, setActivationCode] = useState<string>("");
-  const [devices, setDevices] = useState<Device[]>([]);
-  const [selectedDeviceID, setSelectedDeviceID] = useState<string>("");
-  const [sessions, setSessions] = useState<Session[]>([]);
-  const [approvals, setApprovals] = useState<Approval[]>([]);
+	const [language, setLanguage] = useState<Language>("zh");
+	const [activationCode, setActivationCode] = useState<string>("");
+	const [devices, setDevices] = useState<Device[]>([]);
+	const [selectedDeviceID, setSelectedDeviceID] = useState<string>("");
+	const [sessions, setSessions] = useState<Session[]>([]);
+	const [selectedSessionID, setSelectedSessionID] = useState<string>("");
+	const [outputChunks, setOutputChunks] = useState<OutputChunk[]>([]);
+	const [approvals, setApprovals] = useState<Approval[]>([]);
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
   const [approvalFilter, setApprovalFilter] = useState<ApprovalFilter>("pending");
   const [clientInstanceID, setClientInstanceID] = useState<string>("");
   const [wsState, setWSState] = useState<WSState>("idle");
-  const [submittingApprovals, setSubmittingApprovals] = useState<Set<string>>(new Set());
-  const [error, setError] = useState<string>("");
-  const selectedDeviceRef = useRef("");
-  const approvalFilterRef = useRef<ApprovalFilter>("pending");
-  const text = copy[language];
+	const [submittingApprovals, setSubmittingApprovals] = useState<Set<string>>(new Set());
+	const [error, setError] = useState<string>("");
+	const selectedDeviceRef = useRef("");
+	const selectedSessionRef = useRef("");
+	const approvalFilterRef = useRef<ApprovalFilter>("pending");
+	const text = copy[language];
 
-  useEffect(() => {
-    selectedDeviceRef.current = selectedDeviceID;
-  }, [selectedDeviceID]);
+	useEffect(() => {
+		selectedDeviceRef.current = selectedDeviceID;
+	}, [selectedDeviceID]);
+
+	useEffect(() => {
+		selectedSessionRef.current = selectedSessionID;
+	}, [selectedSessionID]);
 
   useEffect(() => {
     approvalFilterRef.current = approvalFilter;
@@ -214,6 +230,17 @@ function App() {
         refreshApprovals(approvalFilterRef.current);
         refreshSessions(selectedDeviceRef.current);
         refreshAuditLogs();
+        return;
+      }
+      if (message.type === "session.updated") {
+        refreshSessions(selectedDeviceRef.current);
+        if (selectedSessionRef.current === message.payload?.session_id) {
+          refreshOutputChunks(selectedSessionRef.current);
+        }
+        return;
+      }
+      if (message.type === "device.status_changed") {
+        refreshDevices();
       }
     };
     socket.onerror = () => setWSState("closed");
@@ -257,6 +284,8 @@ function App() {
   async function refreshSessions(deviceID = selectedDeviceRef.current) {
     if (!deviceID) {
       setSessions([]);
+      setSelectedSessionID("");
+      setOutputChunks([]);
       return;
     }
     setError("");
@@ -266,7 +295,27 @@ function App() {
       return;
     }
     const body = await response.json();
-    setSessions(body.data.items);
+    const items = body.data.items as Session[];
+    setSessions(items);
+    if (selectedSessionRef.current && !items.some((item) => item.session_id === selectedSessionRef.current)) {
+      setSelectedSessionID("");
+      setOutputChunks([]);
+    }
+  }
+
+  async function refreshOutputChunks(sessionID = selectedSessionRef.current) {
+    if (!sessionID) {
+      setOutputChunks([]);
+      return;
+    }
+    setError("");
+    const response = await fetch(`/api/v1/sessions/${sessionID}/output-chunks`);
+    if (!response.ok) {
+      setError(await responseErrorMessage(response, text));
+      return;
+    }
+    const body = await response.json();
+    setOutputChunks(body.data.items as OutputChunk[]);
   }
 
   async function refreshApprovals(filter = approvalFilterRef.current) {
@@ -406,6 +455,8 @@ function App() {
                   key={device.device_id}
                   onClick={() => {
                     setSelectedDeviceID(device.device_id);
+                    setSelectedSessionID("");
+                    setOutputChunks([]);
                     refreshSessions(device.device_id);
                   }}
                 >
@@ -432,10 +483,40 @@ function App() {
               <p>{text.noSessions}</p>
             ) : (
               sessions.map((session) => (
-                <article className="deviceRow" key={session.session_id}>
+                <article
+                  className={`deviceRow ${selectedSessionID === session.session_id ? "selected" : ""}`}
+                  key={session.session_id}
+                  onClick={() => {
+                    setSelectedSessionID(session.session_id);
+                    refreshOutputChunks(session.session_id);
+                  }}
+                >
                   <strong>{session.cli_type}</strong>
                   <span>{session.status}</span>
                   <span>{session.last_output_summary}</span>
+                </article>
+              ))
+            )}
+          </div>
+        </section>
+        <section className="toolPanel">
+          <div className="toolHeader">
+            <h2>Output replay</h2>
+            <div className="toolActions">
+              <button onClick={() => refreshOutputChunks()}>
+                <RefreshCw size={16} />
+                Refresh output
+              </button>
+            </div>
+          </div>
+          <div className="outputList">
+            {outputChunks.length === 0 ? (
+              <p>No output chunks</p>
+            ) : (
+              outputChunks.map((chunk) => (
+                <article className="outputRow" key={chunk.chunk_id}>
+                  <span>#{chunk.sequence_no} {chunk.stream_type}</span>
+                  <pre>{chunk.content_redacted}</pre>
                 </article>
               ))
             )}

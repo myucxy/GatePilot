@@ -282,6 +282,31 @@ p {
   padding: 10px 12px;
 }
 
+.outputList {
+  display: grid;
+  gap: 10px;
+}
+
+.outputRow {
+  display: grid;
+  grid-template-columns: 120px minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  padding: 10px 12px;
+}
+
+.outputRow pre {
+  margin: 0;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 13px;
+  color: #202124;
+}
+
 @media (max-width: 820px) {
   .shell {
     grid-template-columns: 1fr;
@@ -318,6 +343,10 @@ p {
   }
 
   .auditRow {
+    grid-template-columns: 1fr;
+  }
+
+  .outputRow {
     grid-template-columns: 1fr;
   }
 }

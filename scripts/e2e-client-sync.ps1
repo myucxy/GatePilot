@@ -40,6 +40,21 @@ function Receive-WSJson {
     return ($builder.ToString() | ConvertFrom-Json)
 }
 
+function Receive-WSJsonType {
+    param(
+        [System.Net.WebSockets.ClientWebSocket]$Socket,
+        [string]$Type
+    )
+
+    for ($i = 0; $i -lt 10; $i++) {
+        $message = Receive-WSJson -Socket $Socket
+        if ($message.type -eq $Type) {
+            return $message
+        }
+    }
+    throw "websocket message type $Type was not received"
+}
+
 $go = Resolve-Go
 $server = $null
 $socket = $null
@@ -141,7 +156,7 @@ try {
             expires_in_seconds = 300
         } | ConvertTo-Json)
 
-    $created = Receive-WSJson -Socket $socket
+    $created = Receive-WSJsonType -Socket $socket -Type "approval.created"
     if ($created.type -ne "approval.created" -or $created.payload.approval_id -ne $approval.data.approval_id) {
         throw "unexpected approval.created message: $($created | ConvertTo-Json -Compress)"
     }
@@ -156,7 +171,7 @@ try {
         } `
         -Body (@{ decision_type = "approve"; payload = "" } | ConvertTo-Json)
 
-    $updated = Receive-WSJson -Socket $socket
+    $updated = Receive-WSJsonType -Socket $socket -Type "approval.updated"
     if ($updated.type -ne "approval.updated" -or $updated.payload.approval_id -ne $approval.data.approval_id -or $updated.payload.status -ne "delivering") {
         throw "unexpected approval.updated message: $($updated | ConvertTo-Json -Compress)"
     }
