@@ -107,6 +107,35 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'active', $9, $9, $9)`,
 	return item, nil
 }
 
+func (s *postgresStore) RegisterPushToken(clientInstanceID string, req registerPushTokenRequest, now time.Time) (clientInstance, *appError) {
+	if req.Provider == "" || req.Token == "" {
+		return clientInstance{}, &appError{HTTPStatus: http.StatusBadRequest, Code: "message_schema_invalid", Message: "provider and token are required"}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	row := s.db.QueryRowContext(ctx, `
+UPDATE client_instances
+SET push_provider = $1,
+    push_token_ciphertext = $2,
+    last_seen_at = $3,
+    updated_at = $3
+WHERE id = $4
+RETURNING id::text, tenant_id::text, user_id::text, client_type, COALESCE(device_id::text, ''), display_name, app_version, platform, push_provider, status, last_seen_at, created_at`,
+		req.Provider, sha256Hex(req.Token), now, clientInstanceID)
+	var item clientInstance
+	var lastSeenAt, createdAt time.Time
+	err := row.Scan(&item.ClientInstanceID, &item.TenantID, &item.UserID, &item.ClientType, &item.DeviceID, &item.DisplayName, &item.AppVersion, &item.Platform, &item.PushProvider, &item.Status, &lastSeenAt, &createdAt)
+	if err == sql.ErrNoRows {
+		return clientInstance{}, &appError{HTTPStatus: http.StatusNotFound, Code: "client_instance_not_found", Message: "client instance not found"}
+	}
+	if err != nil {
+		return clientInstance{}, internalStoreError(err)
+	}
+	item.LastSeenAt = lastSeenAt.Format(time.RFC3339)
+	item.CreatedAt = createdAt.Format(time.RFC3339)
+	return item, nil
+}
+
 func (s *postgresStore) CreateActivationCode(tenantID string, req createActivationCodeRequest, idempotencyKey string, now time.Time) (string, time.Time, *appError) {
 	if req.Name == "" {
 		req.Name = "New Device"
@@ -693,6 +722,94 @@ SELECT EXISTS (
       AND revoked_at IS NULL
 )`, tenantID, deviceID, userID).Scan(&exists)
 	return err == nil && exists
+}
+
+func (s *postgresStore) ExpireApprovals(now time.Time) []approval {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return []approval{}
+	}
+	defer tx.Rollback()
+
+	rows, err := tx.QueryContext(ctx, `
+SELECT id::text
+FROM approval_requests
+WHERE status = 'waiting_decision' AND expires_at <= $1
+ORDER BY expires_at ASC
+FOR UPDATE`, now)
+	if err != nil {
+		return []approval{}
+	}
+	defer rows.Close()
+
+	approvalIDs := []string{}
+	for rows.Next() {
+		var approvalID string
+		if err := rows.Scan(&approvalID); err != nil {
+			return []approval{}
+		}
+		approvalIDs = append(approvalIDs, approvalID)
+	}
+	if err := rows.Err(); err != nil {
+		return []approval{}
+	}
+
+	expired := []approval{}
+	decidedBy := map[string]string{
+		"actor_type":   "system",
+		"actor_id":     "timeout-worker",
+		"display_name": "Timeout Worker",
+		"client_type":  "worker",
+	}
+	decidedByJSON, err := json.Marshal(decidedBy)
+	if err != nil {
+		return []approval{}
+	}
+	for _, approvalID := range approvalIDs {
+		deliveryID := randomUUID()
+		if _, err := tx.ExecContext(ctx, `
+UPDATE approval_requests
+SET status = 'delivering',
+    decision_type = 'reject',
+    decision_payload = 'timeout',
+    decided_by = $1::jsonb,
+    decided_at = $2,
+    updated_at = $2
+WHERE id = $3`, string(decidedByJSON), now, approvalID); err != nil {
+			return []approval{}
+		}
+		if _, err := tx.ExecContext(ctx, `
+INSERT INTO approval_actions(tenant_id, approval_id, action_type, actor_type, actor_id, client_type, payload_redacted, result, created_at)
+SELECT tenant_id, id, 'reject', 'system', NULL, 'worker', 'timeout', 'accepted', $1
+FROM approval_requests
+WHERE id = $2`, now, approvalID); err != nil {
+			return []approval{}
+		}
+		if _, err := tx.ExecContext(ctx, `
+INSERT INTO approval_deliveries(id, tenant_id, approval_id, device_id, session_id, decision_type, decision_payload, status, attempt_count, sent_at, created_at, updated_at)
+SELECT $1, tenant_id, id, device_id, session_id, 'reject', 'timeout', 'sent', 1, $2, $2, $2
+FROM approval_requests
+WHERE id = $3`, deliveryID, now, approvalID); err != nil {
+			return []approval{}
+		}
+		if _, err := tx.ExecContext(ctx, `
+UPDATE sessions
+SET status = 'waiting_approval', last_output_summary = 'approval timeout reject delivering'
+WHERE id = (SELECT session_id FROM approval_requests WHERE id = $1)`, approvalID); err != nil {
+			return []approval{}
+		}
+		item, appErr := s.findApprovalByID(ctx, tx, approvalID)
+		if appErr != nil {
+			return []approval{}
+		}
+		expired = append(expired, item)
+	}
+	if err := tx.Commit(); err != nil {
+		return []approval{}
+	}
+	return expired
 }
 
 func (s *postgresStore) ListDeviceSessions(deviceID string) []session {

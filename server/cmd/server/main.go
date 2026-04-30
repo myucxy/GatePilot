@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -98,6 +99,7 @@ type clientInstance struct {
 	DisplayName      string `json:"display_name"`
 	AppVersion       string `json:"app_version"`
 	Platform         string `json:"platform"`
+	PushProvider     string `json:"push_provider,omitempty"`
 	Status           string `json:"status"`
 	LastSeenAt       string `json:"last_seen_at"`
 	CreatedAt        string `json:"created_at"`
@@ -177,6 +179,11 @@ type createDeviceGrantRequest struct {
 	Permission string `json:"permission"`
 }
 
+type registerPushTokenRequest struct {
+	Provider string `json:"provider"`
+	Token    string `json:"token"`
+}
+
 type appError struct {
 	HTTPStatus int
 	Code       string
@@ -196,6 +203,8 @@ type gatePilotStore interface {
 	AckApprovalDecision(req ackApprovalDecisionRequest) (map[string]any, *appError)
 	CreateDeviceGrant(deviceID string, req createDeviceGrantRequest, grantedBy string, now time.Time) (deviceGrant, *appError)
 	CanApproveDevice(tenantID string, deviceID string, userID string) bool
+	RegisterPushToken(clientInstanceID string, req registerPushTokenRequest, now time.Time) (clientInstance, *appError)
+	ExpireApprovals(now time.Time) []approval
 	ListDeviceSessions(deviceID string) []session
 	MarkDeviceSeen(deviceID string, now time.Time) *appError
 	MarkClientInstanceSeen(clientInstanceID string, now time.Time) *appError
@@ -301,6 +310,22 @@ func (s *memoryStore) RegisterClientInstance(req registerClientInstanceRequest, 
 	}
 	s.clientInstances[item.ClientInstanceID] = item
 	s.clientInstanceReplay[replayKey] = clientInstanceReplay{Signature: signature, Item: item}
+	return item, nil
+}
+
+func (s *memoryStore) RegisterPushToken(clientInstanceID string, req registerPushTokenRequest, now time.Time) (clientInstance, *appError) {
+	if req.Provider == "" || req.Token == "" {
+		return clientInstance{}, &appError{HTTPStatus: http.StatusBadRequest, Code: "message_schema_invalid", Message: "provider and token are required"}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	item, ok := s.clientInstances[clientInstanceID]
+	if !ok {
+		return clientInstance{}, &appError{HTTPStatus: http.StatusNotFound, Code: "client_instance_not_found", Message: "client instance not found"}
+	}
+	item.PushProvider = req.Provider
+	item.LastSeenAt = now.Format(time.RFC3339)
+	s.clientInstances[clientInstanceID] = item
 	return item, nil
 }
 
@@ -629,6 +654,41 @@ func (s *memoryStore) CanApproveDevice(tenantID string, deviceID string, userID 
 	return false
 }
 
+func (s *memoryStore) ExpireApprovals(now time.Time) []approval {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	expired := []approval{}
+	for _, item := range s.approvals {
+		if item.Status != "waiting_decision" {
+			continue
+		}
+		expiresAt, err := time.Parse(time.RFC3339, item.ExpiresAt)
+		if err != nil || now.Before(expiresAt) {
+			continue
+		}
+		item.Status = "delivering"
+		item.DecisionType = "reject"
+		item.DecisionPayload = "timeout"
+		item.DeliveryID = randomUUID()
+		item.DeliveryStatus = "sent"
+		item.DecidedAt = now.Format(time.RFC3339)
+		item.DecidedBy = map[string]string{
+			"actor_type":   "system",
+			"actor_id":     "timeout-worker",
+			"display_name": "Timeout Worker",
+			"client_type":  "worker",
+		}
+		s.approvals[item.ApprovalID] = item
+		if sessionItem, ok := s.sessions[item.SessionID]; ok {
+			sessionItem.Status = "waiting_approval"
+			sessionItem.LastOutputSummary = "approval timeout reject delivering"
+			s.sessions[item.SessionID] = sessionItem
+		}
+		expired = append(expired, item)
+	}
+	return expired
+}
+
 func (s *memoryStore) ListDeviceSessions(deviceID string) []session {
 	items := []session{}
 	s.mu.Lock()
@@ -716,6 +776,7 @@ func main() {
 	if err := configureStore(); err != nil {
 		log.Fatal(err)
 	}
+	startWorkersFromEnv()
 
 	// M0 阶段先暴露健康检查和当前用户接口，后续模块按 docs/03-detailed-design.md 拆入 domain service。
 	log.Printf("gatepilot server listening on %s", addr)
@@ -746,6 +807,7 @@ func newRouter() http.Handler {
 	mux.HandleFunc("/api/v1/healthz", healthHandler)
 	mux.HandleFunc("/api/v1/me", meHandler)
 	mux.HandleFunc("/api/v1/client-instances", clientInstancesHandler)
+	mux.HandleFunc("/api/v1/client-instances/", clientInstanceScopedHandler)
 	mux.HandleFunc("/api/v1/agent/register", agentRegisterHandler)
 	mux.HandleFunc("/api/v1/agent/sessions", agentSessionsHandler)
 	mux.HandleFunc("/api/v1/agent/approvals", agentApprovalsHandler)
@@ -757,6 +819,71 @@ func newRouter() http.Handler {
 	mux.HandleFunc("/ws/client", clientWebSocketHandler)
 
 	return requestLog(cors(mux))
+}
+
+func startWorkersFromEnv() {
+	value := os.Getenv("GATEPILOT_WORKER_INTERVAL_SECONDS")
+	if value == "" || value == "0" {
+		return
+	}
+	seconds, err := strconv.Atoi(value)
+	if err != nil || seconds <= 0 {
+		log.Printf("invalid GATEPILOT_WORKER_INTERVAL_SECONDS=%q", value)
+		return
+	}
+	go func() {
+		ticker := time.NewTicker(time.Duration(seconds) * time.Second)
+		defer ticker.Stop()
+		for {
+			runExpiryWorkerOnce()
+			<-ticker.C
+		}
+	}()
+}
+
+func runExpiryWorkerOnce() {
+	for _, item := range store.ExpireApprovals(time.Now().UTC()) {
+		pushApprovalDecisionToAgent(item)
+		pushApprovalUpdatedToClients(item)
+	}
+}
+
+func clientInstanceScopedHandler(w http.ResponseWriter, r *http.Request) {
+	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/v1/client-instances/"), "/")
+	if len(parts) < 2 {
+		http.NotFound(w, r)
+		return
+	}
+	clientInstanceID := parts[0]
+	resource := parts[1]
+	switch {
+	case resource == "push-token" && r.Method == http.MethodPost:
+		registerPushTokenHandler(w, r, clientInstanceID)
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+func registerPushTokenHandler(w http.ResponseWriter, r *http.Request, clientInstanceID string) {
+	var req registerPushTokenRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, r, http.StatusBadRequest, "message_schema_invalid", err.Error())
+		return
+	}
+	item, appErr := store.RegisterPushToken(clientInstanceID, req, time.Now().UTC())
+	if appErr != nil {
+		writeAppError(w, r, appErr)
+		return
+	}
+	writeJSON(w, envelope{
+		Data: map[string]string{
+			"client_instance_id": item.ClientInstanceID,
+			"push_provider":      item.PushProvider,
+			"status":             item.Status,
+		},
+		RequestID: requestID(r),
+		TraceID:   traceID(r),
+	})
 }
 
 func clientInstancesHandler(w http.ResponseWriter, r *http.Request) {

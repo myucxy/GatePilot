@@ -69,6 +69,49 @@ paths:
           $ref: "#/components/responses/ErrorResponse"
         "401":
           $ref: "#/components/responses/ErrorResponse"
+  /client-instances/{client_instance_id}/push-token:
+    post:
+      operationId: registerPushToken
+      summary: Register or rotate a client instance push token
+      parameters:
+        - name: client_instance_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RegisterPushTokenRequest"
+      responses:
+        "200":
+          description: Push token registered
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required:
+                          - client_instance_id
+                          - push_provider
+                          - status
+                        properties:
+                          client_instance_id:
+                            type: string
+                            format: uuid
+                          push_provider:
+                            type: string
+                          status:
+                            type: string
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
   /tenants/{tenant_id}/device-activation-codes:
     post:
       operationId: createDeviceActivationCode
@@ -501,6 +544,20 @@ components:
             - ios
             - android
             - browser
+    RegisterPushTokenRequest:
+      type: object
+      required:
+        - provider
+        - token
+      properties:
+        provider:
+          type: string
+          enum:
+            - apns
+            - fcm
+            - webpush
+        token:
+          type: string
     CreateDeviceActivationCodeRequest:
       type: object
       required:

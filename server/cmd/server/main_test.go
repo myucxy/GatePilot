@@ -348,6 +348,54 @@ func TestClientInstanceRegistrationIdempotencyReplaysFirstInstance(t *testing.T)
 	}
 }
 
+func TestClientInstancePushTokenRegistration(t *testing.T) {
+	resetTestStore()
+	server := httptest.NewServer(newRouter())
+	defer server.Close()
+
+	clientInstanceID := registerTestClientInstance(t, server.URL)
+	body := postJSON(t, server.URL+"/api/v1/client-instances/"+clientInstanceID+"/push-token", map[string]any{
+		"provider": "fcm",
+		"token":    "push-token-secret",
+	}, http.StatusOK)
+	if got := dataString(t, body, "push_provider"); got != "fcm" {
+		t.Fatalf("push_provider = %q, want fcm", got)
+	}
+}
+
+func TestExpiryWorkerRejectsExpiredApprovalsForDelivery(t *testing.T) {
+	resetTestStore()
+	server := httptest.NewServer(newRouter())
+	defer server.Close()
+
+	code := createTestActivationCode(t, server.URL)
+	deviceID := registerTestDevice(t, server.URL, code)
+	sessionID := createTestSession(t, server.URL, deviceID)
+	approvalID := createTestApproval(t, server.URL, deviceID, sessionID)
+
+	memory, ok := store.(*memoryStore)
+	if !ok {
+		t.Fatal("test requires memory store")
+	}
+	memory.mu.Lock()
+	item := memory.approvals[approvalID]
+	item.ExpiresAt = time.Now().UTC().Add(-time.Second).Format(time.RFC3339)
+	memory.approvals[approvalID] = item
+	memory.mu.Unlock()
+
+	runExpiryWorkerOnce()
+	approvals := getJSON(t, server.URL+"/api/v1/tenants/"+testTenantID+"/approvals", http.StatusOK)
+	for _, item := range dataItems(t, approvals) {
+		if item["approval_id"] == approvalID {
+			if item["status"] != "delivering" || item["decision_type"] != "reject" || item["delivery_status"] != "sent" {
+				t.Fatalf("expired approval = %v, want delivering reject sent", item)
+			}
+			return
+		}
+	}
+	t.Fatalf("expired approval %s not found", approvalID)
+}
+
 func TestClientWebSocketReceivesApprovalCreatedAndUpdated(t *testing.T) {
 	resetTestStore()
 	server := httptest.NewServer(newRouter())
