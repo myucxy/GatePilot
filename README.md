@@ -96,6 +96,12 @@ M1/M2 端到端冒烟：
 
 该脚本会临时启动 Server，生成设备激活码，调用 Agent 注册设备，创建 fake CLI 会话，上报 fake 审批，提交批准决策，并模拟 Agent ACK 投递结果。
 
+迁移文件复核：
+
+```powershell
+.\scripts\validate-migrations.ps1
+```
+
 Web 管理端：
 
 ```powershell

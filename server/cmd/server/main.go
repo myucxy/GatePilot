@@ -72,6 +72,72 @@ type approval struct {
 	ExpiresAt       string            `json:"expires_at"`
 }
 
+type createActivationCodeRequest struct {
+	Name             string `json:"name"`
+	ExpiresInSeconds int    `json:"expires_in_seconds"`
+}
+
+type registerAgentRequest struct {
+	ActivationCode  string         `json:"activation_code"`
+	DeviceName      string         `json:"device_name"`
+	Platform        string         `json:"platform"`
+	Arch            string         `json:"arch"`
+	AgentVersion    string         `json:"agent_version"`
+	ProtocolVersion string         `json:"protocol_version"`
+	Capabilities    map[string]any `json:"capabilities"`
+}
+
+type createAgentSessionRequest struct {
+	DeviceID            string `json:"device_id"`
+	CLIType             string `json:"cli_type"`
+	CommandLineRedacted string `json:"command_line_redacted"`
+	WorkingDirHash      string `json:"working_dir_hash"`
+	LastOutputSummary   string `json:"last_output_summary"`
+}
+
+type createAgentApprovalRequest struct {
+	DeviceID      string   `json:"device_id"`
+	SessionID     string   `json:"session_id"`
+	CLIType       string   `json:"cli_type"`
+	EventType     string   `json:"event_type"`
+	RiskLevel     string   `json:"risk_level"`
+	PromptText    string   `json:"prompt_text"`
+	ContextBefore string   `json:"context_before"`
+	Suggested     []string `json:"suggested_actions"`
+	ExpiresIn     int      `json:"expires_in_seconds"`
+}
+
+type submitApprovalDecisionRequest struct {
+	DecisionType string `json:"decision_type"`
+	Payload      string `json:"payload"`
+}
+
+type ackApprovalDecisionRequest struct {
+	ApprovalID string         `json:"approval_id"`
+	DeliveryID string         `json:"delivery_id"`
+	SessionID  string         `json:"session_id"`
+	AckResult  string         `json:"ack_result"`
+	Detail     map[string]any `json:"detail"`
+}
+
+type appError struct {
+	HTTPStatus int
+	Code       string
+	Message    string
+}
+
+type gatePilotStore interface {
+	CreateActivationCode(tenantID string, req createActivationCodeRequest, now time.Time) (string, time.Time)
+	ListDevices(tenantID string) []device
+	RegisterAgent(req registerAgentRequest, now time.Time) (device, string, *appError)
+	CreateSession(req createAgentSessionRequest, now time.Time) (session, *appError)
+	CreateApproval(req createAgentApprovalRequest, now time.Time) (approval, *appError)
+	ListApprovals(tenantID string, status string) []approval
+	SubmitApprovalDecision(approvalID string, req submitApprovalDecisionRequest, decidedBy map[string]string, now time.Time) (approval, *appError)
+	AckApprovalDecision(req ackApprovalDecisionRequest) (map[string]any, *appError)
+	ListDeviceSessions(deviceID string) []session
+}
+
 type memoryStore struct {
 	mu              sync.Mutex
 	activationCodes map[string]activationCode
@@ -80,11 +146,263 @@ type memoryStore struct {
 	approvals       map[string]approval
 }
 
-var store = memoryStore{
-	activationCodes: map[string]activationCode{},
-	devices:         map[string]device{},
-	sessions:        map[string]session{},
-	approvals:       map[string]approval{},
+var store gatePilotStore = newMemoryStore()
+
+func newMemoryStore() *memoryStore {
+	return &memoryStore{
+		activationCodes: map[string]activationCode{},
+		devices:         map[string]device{},
+		sessions:        map[string]session{},
+		approvals:       map[string]approval{},
+	}
+}
+
+func (s *memoryStore) Reset() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.activationCodes = map[string]activationCode{}
+	s.devices = map[string]device{}
+	s.sessions = map[string]session{}
+	s.approvals = map[string]approval{}
+}
+
+func (s *memoryStore) CreateActivationCode(tenantID string, req createActivationCodeRequest, now time.Time) (string, time.Time) {
+	if req.Name == "" {
+		req.Name = "New Device"
+	}
+	if req.ExpiresInSeconds <= 0 {
+		req.ExpiresInSeconds = 600
+	}
+
+	code := "GP-" + randomHex(3) + "-" + randomHex(3)
+	expiresAt := now.Add(time.Duration(req.ExpiresInSeconds) * time.Second)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.activationCodes[code] = activationCode{
+		TenantID:  tenantID,
+		Name:      req.Name,
+		Code:      code,
+		ExpiresAt: expiresAt,
+	}
+	return code, expiresAt
+}
+
+func (s *memoryStore) ListDevices(tenantID string) []device {
+	items := []device{}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, item := range s.devices {
+		if item.TenantID == tenantID {
+			items = append(items, item)
+		}
+	}
+	return items
+}
+
+func (s *memoryStore) RegisterAgent(req registerAgentRequest, now time.Time) (device, string, *appError) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	code, ok := s.activationCodes[req.ActivationCode]
+	if !ok || code.Consumed || now.After(code.ExpiresAt) {
+		return device{}, "", &appError{HTTPStatus: http.StatusUnprocessableEntity, Code: "activation_code_invalid", Message: "activation code is invalid"}
+	}
+
+	deviceID := randomUUID()
+	deviceToken := "dt_" + randomHex(24)
+	created := now.Format(time.RFC3339)
+	item := device{
+		DeviceID:  deviceID,
+		TenantID:  code.TenantID,
+		Name:      firstNonEmpty(req.DeviceName, code.Name),
+		Platform:  req.Platform,
+		Arch:      req.Arch,
+		Status:    "active",
+		LastSeen:  created,
+		CreatedAt: created,
+	}
+	s.devices[deviceID] = item
+	code.Consumed = true
+	s.activationCodes[req.ActivationCode] = code
+	return item, deviceToken, nil
+}
+
+func (s *memoryStore) CreateSession(req createAgentSessionRequest, now time.Time) (session, *appError) {
+	if req.CLIType == "" {
+		req.CLIType = "custom"
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	deviceItem, ok := s.devices[req.DeviceID]
+	if !ok {
+		return session{}, &appError{HTTPStatus: http.StatusNotFound, Code: "device_offline", Message: "device not found"}
+	}
+
+	sessionID := randomUUID()
+	item := session{
+		SessionID:         sessionID,
+		TenantID:          deviceItem.TenantID,
+		DeviceID:          req.DeviceID,
+		CLIType:           req.CLIType,
+		Status:            "running",
+		StartedAt:         now.Format(time.RFC3339),
+		LastOutputSummary: firstNonEmpty(req.LastOutputSummary, "fake CLI session started"),
+		PendingApprovals:  0,
+	}
+	s.sessions[sessionID] = item
+	return item, nil
+}
+
+func (s *memoryStore) CreateApproval(req createAgentApprovalRequest, now time.Time) (approval, *appError) {
+	if req.EventType == "" {
+		req.EventType = "permission_request"
+	}
+	if req.RiskLevel == "" {
+		req.RiskLevel = "high"
+	}
+	if req.ExpiresIn <= 0 {
+		req.ExpiresIn = 300
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sessionItem, ok := s.sessions[req.SessionID]
+	if !ok || sessionItem.DeviceID != req.DeviceID {
+		return approval{}, &appError{HTTPStatus: http.StatusNotFound, Code: "agent_session_not_found", Message: "session not found"}
+	}
+
+	approvalID := randomUUID()
+	item := approval{
+		ApprovalID:     approvalID,
+		TenantID:       sessionItem.TenantID,
+		DeviceID:       req.DeviceID,
+		SessionID:      req.SessionID,
+		CLIType:        firstNonEmpty(req.CLIType, sessionItem.CLIType),
+		EventType:      req.EventType,
+		RiskLevel:      req.RiskLevel,
+		PromptText:     firstNonEmpty(req.PromptText, "allow command execution?"),
+		ContextBefore:  req.ContextBefore,
+		Status:         "waiting_decision",
+		DeliveryStatus: "pending",
+		CreatedAt:      now.Format(time.RFC3339),
+		ExpiresAt:      now.Add(time.Duration(req.ExpiresIn) * time.Second).Format(time.RFC3339),
+	}
+	s.approvals[approvalID] = item
+	sessionItem.Status = "waiting_approval"
+	sessionItem.PendingApprovals++
+	s.sessions[req.SessionID] = sessionItem
+	return item, nil
+}
+
+func (s *memoryStore) ListApprovals(tenantID string, status string) []approval {
+	items := []approval{}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, item := range s.approvals {
+		if item.TenantID != tenantID {
+			continue
+		}
+		if status != "" && item.Status != status {
+			continue
+		}
+		items = append(items, item)
+	}
+	return items
+}
+
+func (s *memoryStore) SubmitApprovalDecision(approvalID string, req submitApprovalDecisionRequest, decidedBy map[string]string, now time.Time) (approval, *appError) {
+	if req.DecisionType == "" {
+		req.DecisionType = "approve"
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	item, ok := s.approvals[approvalID]
+	if !ok {
+		return approval{}, &appError{HTTPStatus: http.StatusNotFound, Code: "approval_not_found", Message: "approval not found"}
+	}
+	if item.Status != "waiting_decision" {
+		return approval{}, &appError{HTTPStatus: http.StatusConflict, Code: "approval_already_decided", Message: "approval already decided"}
+	}
+
+	// 用户提交决策只代表控制面已接收，真正完成必须等待 Agent 回写 CLI 后 ACK。
+	item.Status = "delivering"
+	item.DecisionType = req.DecisionType
+	item.DecisionPayload = req.Payload
+	item.DeliveryID = randomUUID()
+	item.DeliveryStatus = "sent"
+	item.DecidedBy = decidedBy
+	item.DecidedAt = now.Format(time.RFC3339)
+	s.approvals[approvalID] = item
+
+	if sessionItem, ok := s.sessions[item.SessionID]; ok {
+		sessionItem.Status = "waiting_approval"
+		sessionItem.LastOutputSummary = "approval " + req.DecisionType + " delivering"
+		s.sessions[item.SessionID] = sessionItem
+	}
+	return item, nil
+}
+
+func (s *memoryStore) AckApprovalDecision(req ackApprovalDecisionRequest) (map[string]any, *appError) {
+	if req.AckResult == "" {
+		req.AckResult = "written"
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	item, ok := s.approvals[req.ApprovalID]
+	if !ok {
+		return nil, &appError{HTTPStatus: http.StatusNotFound, Code: "approval_not_found", Message: "approval not found"}
+	}
+	if item.Status == "delivered" && item.DeliveryStatus == "acked" {
+		return approvalAckData(item), nil
+	}
+	if item.Status != "delivering" || item.SessionID != req.SessionID || item.DeliveryID != req.DeliveryID {
+		return nil, &appError{HTTPStatus: http.StatusConflict, Code: "delivery_failed", Message: "delivery ack does not match an active delivery"}
+	}
+
+	switch req.AckResult {
+	case "written", "accepted":
+		item.Status = "delivered"
+		item.DeliveryStatus = "acked"
+	default:
+		item.Status = "delivery_failed"
+		item.DeliveryStatus = "failed"
+	}
+	s.approvals[item.ApprovalID] = item
+
+	if sessionItem, ok := s.sessions[item.SessionID]; ok {
+		sessionItem.Status = "running"
+		if sessionItem.PendingApprovals > 0 {
+			sessionItem.PendingApprovals--
+		}
+		sessionItem.LastOutputSummary = "approval " + item.DecisionType + " " + item.Status
+		s.sessions[item.SessionID] = sessionItem
+	}
+	return approvalAckData(item), nil
+}
+
+func (s *memoryStore) ListDeviceSessions(deviceID string) []session {
+	items := []session{}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, item := range s.sessions {
+		if item.DeviceID == deviceID {
+			items = append(items, item)
+		}
+	}
+	return items
+}
+
+func approvalAckData(item approval) map[string]any {
+	return map[string]any{
+		"approval_id":     item.ApprovalID,
+		"delivery_id":     item.DeliveryID,
+		"status":          item.Status,
+		"delivery_status": item.DeliveryStatus,
+	}
 }
 
 func main() {
@@ -211,32 +529,12 @@ func tenantScopedHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func createActivationCodeHandler(w http.ResponseWriter, r *http.Request, tenantID string) {
-	var req struct {
-		Name             string `json:"name"`
-		ExpiresInSeconds int    `json:"expires_in_seconds"`
-	}
+	var req createActivationCodeRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, r, http.StatusBadRequest, "message_schema_invalid", err.Error())
 		return
 	}
-	if req.Name == "" {
-		req.Name = "New Device"
-	}
-	if req.ExpiresInSeconds <= 0 {
-		req.ExpiresInSeconds = 600
-	}
-
-	code := "GP-" + randomHex(3) + "-" + randomHex(3)
-	expiresAt := time.Now().UTC().Add(time.Duration(req.ExpiresInSeconds) * time.Second)
-
-	store.mu.Lock()
-	store.activationCodes[code] = activationCode{
-		TenantID:  tenantID,
-		Name:      req.Name,
-		Code:      code,
-		ExpiresAt: expiresAt,
-	}
-	store.mu.Unlock()
+	code, expiresAt := store.CreateActivationCode(tenantID, req, time.Now().UTC())
 
 	writeStatusJSON(w, http.StatusCreated, envelope{
 		Data: map[string]any{
@@ -249,19 +547,9 @@ func createActivationCodeHandler(w http.ResponseWriter, r *http.Request, tenantI
 }
 
 func listDevicesHandler(w http.ResponseWriter, r *http.Request, tenantID string) {
-	items := []device{}
-
-	store.mu.Lock()
-	for _, item := range store.devices {
-		if item.TenantID == tenantID {
-			items = append(items, item)
-		}
-	}
-	store.mu.Unlock()
-
 	writeJSON(w, envelope{
 		Data: map[string]any{
-			"items":       items,
+			"items":       store.ListDevices(tenantID),
 			"next_cursor": nil,
 			"has_more":    false,
 		},
@@ -276,49 +564,20 @@ func agentRegisterHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req struct {
-		ActivationCode  string         `json:"activation_code"`
-		DeviceName      string         `json:"device_name"`
-		Platform        string         `json:"platform"`
-		Arch            string         `json:"arch"`
-		AgentVersion    string         `json:"agent_version"`
-		ProtocolVersion string         `json:"protocol_version"`
-		Capabilities    map[string]any `json:"capabilities"`
-	}
+	var req registerAgentRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, r, http.StatusBadRequest, "message_schema_invalid", err.Error())
 		return
 	}
-
-	now := time.Now().UTC()
-	store.mu.Lock()
-	code, ok := store.activationCodes[req.ActivationCode]
-	if !ok || code.Consumed || now.After(code.ExpiresAt) {
-		store.mu.Unlock()
-		writeError(w, r, http.StatusUnprocessableEntity, "activation_code_invalid", "activation code is invalid")
+	item, deviceToken, appErr := store.RegisterAgent(req, time.Now().UTC())
+	if appErr != nil {
+		writeAppError(w, r, appErr)
 		return
 	}
 
-	deviceID := randomUUID()
-	deviceToken := "dt_" + randomHex(24)
-	created := now.Format(time.RFC3339)
-	store.devices[deviceID] = device{
-		DeviceID:  deviceID,
-		TenantID:  code.TenantID,
-		Name:      firstNonEmpty(req.DeviceName, code.Name),
-		Platform:  req.Platform,
-		Arch:      req.Arch,
-		Status:    "active",
-		LastSeen:  created,
-		CreatedAt: created,
-	}
-	code.Consumed = true
-	store.activationCodes[req.ActivationCode] = code
-	store.mu.Unlock()
-
 	writeStatusJSON(w, http.StatusCreated, envelope{
 		Data: map[string]any{
-			"device_id":     deviceID,
+			"device_id":     item.DeviceID,
 			"device_token":  deviceToken,
 			"server_ws_url": "ws://" + r.Host + "/ws/agent",
 		},
@@ -333,43 +592,16 @@ func agentSessionsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req struct {
-		DeviceID            string `json:"device_id"`
-		CLIType             string `json:"cli_type"`
-		CommandLineRedacted string `json:"command_line_redacted"`
-		WorkingDirHash      string `json:"working_dir_hash"`
-		LastOutputSummary   string `json:"last_output_summary"`
-	}
+	var req createAgentSessionRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, r, http.StatusBadRequest, "message_schema_invalid", err.Error())
 		return
 	}
-	if req.CLIType == "" {
-		req.CLIType = "custom"
-	}
-
-	now := time.Now().UTC()
-	store.mu.Lock()
-	deviceItem, ok := store.devices[req.DeviceID]
-	if !ok {
-		store.mu.Unlock()
-		writeError(w, r, http.StatusNotFound, "device_offline", "device not found")
+	item, appErr := store.CreateSession(req, time.Now().UTC())
+	if appErr != nil {
+		writeAppError(w, r, appErr)
 		return
 	}
-
-	sessionID := randomUUID()
-	item := session{
-		SessionID:         sessionID,
-		TenantID:          deviceItem.TenantID,
-		DeviceID:          req.DeviceID,
-		CLIType:           req.CLIType,
-		Status:            "running",
-		StartedAt:         now.Format(time.RFC3339),
-		LastOutputSummary: firstNonEmpty(req.LastOutputSummary, "fake CLI session started"),
-		PendingApprovals:  0,
-	}
-	store.sessions[sessionID] = item
-	store.mu.Unlock()
 
 	writeStatusJSON(w, http.StatusCreated, envelope{
 		Data:      item,
@@ -384,61 +616,16 @@ func agentApprovalsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req struct {
-		DeviceID      string   `json:"device_id"`
-		SessionID     string   `json:"session_id"`
-		CLIType       string   `json:"cli_type"`
-		EventType     string   `json:"event_type"`
-		RiskLevel     string   `json:"risk_level"`
-		PromptText    string   `json:"prompt_text"`
-		ContextBefore string   `json:"context_before"`
-		Suggested     []string `json:"suggested_actions"`
-		ExpiresIn     int      `json:"expires_in_seconds"`
-	}
+	var req createAgentApprovalRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, r, http.StatusBadRequest, "message_schema_invalid", err.Error())
 		return
 	}
-	if req.EventType == "" {
-		req.EventType = "permission_request"
-	}
-	if req.RiskLevel == "" {
-		req.RiskLevel = "high"
-	}
-	if req.ExpiresIn <= 0 {
-		req.ExpiresIn = 300
-	}
-
-	now := time.Now().UTC()
-	store.mu.Lock()
-	sessionItem, ok := store.sessions[req.SessionID]
-	if !ok || sessionItem.DeviceID != req.DeviceID {
-		store.mu.Unlock()
-		writeError(w, r, http.StatusNotFound, "agent_session_not_found", "session not found")
+	item, appErr := store.CreateApproval(req, time.Now().UTC())
+	if appErr != nil {
+		writeAppError(w, r, appErr)
 		return
 	}
-
-	approvalID := randomUUID()
-	item := approval{
-		ApprovalID:     approvalID,
-		TenantID:       sessionItem.TenantID,
-		DeviceID:       req.DeviceID,
-		SessionID:      req.SessionID,
-		CLIType:        firstNonEmpty(req.CLIType, sessionItem.CLIType),
-		EventType:      req.EventType,
-		RiskLevel:      req.RiskLevel,
-		PromptText:     firstNonEmpty(req.PromptText, "allow command execution?"),
-		ContextBefore:  req.ContextBefore,
-		Status:         "waiting_decision",
-		DeliveryStatus: "pending",
-		CreatedAt:      now.Format(time.RFC3339),
-		ExpiresAt:      now.Add(time.Duration(req.ExpiresIn) * time.Second).Format(time.RFC3339),
-	}
-	store.approvals[approvalID] = item
-	sessionItem.Status = "waiting_approval"
-	sessionItem.PendingApprovals++
-	store.sessions[req.SessionID] = sessionItem
-	store.mu.Unlock()
 
 	writeStatusJSON(w, http.StatusCreated, envelope{
 		Data:      item,
@@ -449,23 +636,10 @@ func agentApprovalsHandler(w http.ResponseWriter, r *http.Request) {
 
 func listApprovalsHandler(w http.ResponseWriter, r *http.Request, tenantID string) {
 	status := r.URL.Query().Get("status")
-	items := []approval{}
-
-	store.mu.Lock()
-	for _, item := range store.approvals {
-		if item.TenantID != tenantID {
-			continue
-		}
-		if status != "" && item.Status != status {
-			continue
-		}
-		items = append(items, item)
-	}
-	store.mu.Unlock()
 
 	writeJSON(w, envelope{
 		Data: map[string]any{
-			"items":       items,
+			"items":       store.ListApprovals(tenantID, status),
 			"next_cursor": nil,
 			"has_more":    false,
 		},
@@ -475,54 +649,23 @@ func listApprovalsHandler(w http.ResponseWriter, r *http.Request, tenantID strin
 }
 
 func submitApprovalDecisionHandler(w http.ResponseWriter, r *http.Request, approvalID string) {
-	var req struct {
-		DecisionType string `json:"decision_type"`
-		Payload      string `json:"payload"`
-	}
+	var req submitApprovalDecisionRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, r, http.StatusBadRequest, "message_schema_invalid", err.Error())
 		return
 	}
-	if req.DecisionType == "" {
-		req.DecisionType = "approve"
-	}
-
-	now := time.Now().UTC().Format(time.RFC3339)
-	store.mu.Lock()
-	item, ok := store.approvals[approvalID]
-	if !ok {
-		store.mu.Unlock()
-		writeError(w, r, http.StatusNotFound, "approval_not_found", "approval not found")
-		return
-	}
-	if item.Status != "waiting_decision" {
-		store.mu.Unlock()
-		writeError(w, r, http.StatusConflict, "approval_already_decided", "approval already decided")
-		return
-	}
-
-	// 用户提交决策只代表控制面已接收，真正完成必须等待 Agent 回写 CLI 后 ACK。
-	item.Status = "delivering"
-	item.DecisionType = req.DecisionType
-	item.DecisionPayload = req.Payload
-	item.DeliveryID = randomUUID()
-	item.DeliveryStatus = "sent"
-	item.DecidedBy = map[string]string{
+	decidedBy := map[string]string{
 		"actor_type":         "user",
 		"actor_id":           "00000000-0000-0000-0000-000000000001",
 		"display_name":       "Local Owner",
 		"client_instance_id": firstNonEmpty(r.Header.Get("X-Client-Instance-Id"), "00000000-0000-0000-0000-000000000200"),
 		"client_type":        "web",
 	}
-	item.DecidedAt = now
-	store.approvals[approvalID] = item
-
-	if sessionItem, ok := store.sessions[item.SessionID]; ok {
-		sessionItem.Status = "waiting_approval"
-		sessionItem.LastOutputSummary = "approval " + req.DecisionType + " delivering"
-		store.sessions[item.SessionID] = sessionItem
+	item, appErr := store.SubmitApprovalDecision(approvalID, req, decidedBy, time.Now().UTC())
+	if appErr != nil {
+		writeAppError(w, r, appErr)
+		return
 	}
-	store.mu.Unlock()
 
 	writeJSON(w, envelope{
 		Data:      item,
@@ -537,94 +680,28 @@ func agentApprovalAcksHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req struct {
-		ApprovalID string         `json:"approval_id"`
-		DeliveryID string         `json:"delivery_id"`
-		SessionID  string         `json:"session_id"`
-		AckResult  string         `json:"ack_result"`
-		Detail     map[string]any `json:"detail"`
-	}
+	var req ackApprovalDecisionRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, r, http.StatusBadRequest, "message_schema_invalid", err.Error())
 		return
 	}
-	if req.AckResult == "" {
-		req.AckResult = "written"
-	}
-
-	store.mu.Lock()
-	item, ok := store.approvals[req.ApprovalID]
-	if !ok {
-		store.mu.Unlock()
-		writeError(w, r, http.StatusNotFound, "approval_not_found", "approval not found")
+	data, appErr := store.AckApprovalDecision(req)
+	if appErr != nil {
+		writeAppError(w, r, appErr)
 		return
 	}
-	if item.Status == "delivered" && item.DeliveryStatus == "acked" {
-		store.mu.Unlock()
-		writeJSON(w, envelope{
-			Data: map[string]any{
-				"approval_id":     item.ApprovalID,
-				"delivery_id":     item.DeliveryID,
-				"status":          item.Status,
-				"delivery_status": item.DeliveryStatus,
-			},
-			RequestID: requestID(r),
-			TraceID:   traceID(r),
-		})
-		return
-	}
-	if item.Status != "delivering" || item.SessionID != req.SessionID || item.DeliveryID != req.DeliveryID {
-		store.mu.Unlock()
-		writeError(w, r, http.StatusConflict, "delivery_failed", "delivery ack does not match an active delivery")
-		return
-	}
-
-	switch req.AckResult {
-	case "written", "accepted":
-		item.Status = "delivered"
-		item.DeliveryStatus = "acked"
-	default:
-		item.Status = "delivery_failed"
-		item.DeliveryStatus = "failed"
-	}
-	store.approvals[item.ApprovalID] = item
-
-	if sessionItem, ok := store.sessions[item.SessionID]; ok {
-		sessionItem.Status = "running"
-		if sessionItem.PendingApprovals > 0 {
-			sessionItem.PendingApprovals--
-		}
-		sessionItem.LastOutputSummary = "approval " + item.DecisionType + " " + item.Status
-		store.sessions[item.SessionID] = sessionItem
-	}
-	store.mu.Unlock()
 
 	writeJSON(w, envelope{
-		Data: map[string]any{
-			"approval_id":     item.ApprovalID,
-			"delivery_id":     item.DeliveryID,
-			"status":          item.Status,
-			"delivery_status": item.DeliveryStatus,
-		},
+		Data:      data,
 		RequestID: requestID(r),
 		TraceID:   traceID(r),
 	})
 }
 
 func listDeviceSessionsHandler(w http.ResponseWriter, r *http.Request, deviceID string) {
-	items := []session{}
-
-	store.mu.Lock()
-	for _, item := range store.sessions {
-		if item.DeviceID == deviceID {
-			items = append(items, item)
-		}
-	}
-	store.mu.Unlock()
-
 	writeJSON(w, envelope{
 		Data: map[string]any{
-			"items":       items,
+			"items":       store.ListDeviceSessions(deviceID),
 			"next_cursor": nil,
 			"has_more":    false,
 		},
@@ -655,6 +732,10 @@ func writeError(w http.ResponseWriter, r *http.Request, status int, code string,
 		"request_id": requestID(r),
 		"trace_id":   traceID(r),
 	})
+}
+
+func writeAppError(w http.ResponseWriter, r *http.Request, err *appError) {
+	writeError(w, r, err.HTTPStatus, err.Code, err.Message)
 }
 
 func requestLog(next http.Handler) http.Handler {

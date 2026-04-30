@@ -181,12 +181,11 @@ func createTestApproval(t *testing.T, baseURL string, deviceID string, sessionID
 
 func resetTestStore() {
 	// 每个测试隔离内存状态，避免激活码消费和审批状态相互影响。
-	store.mu.Lock()
-	defer store.mu.Unlock()
-	store.activationCodes = map[string]activationCode{}
-	store.devices = map[string]device{}
-	store.sessions = map[string]session{}
-	store.approvals = map[string]approval{}
+	if resettable, ok := store.(interface{ Reset() }); ok {
+		resettable.Reset()
+		return
+	}
+	store = newMemoryStore()
 }
 
 func getJSON(t *testing.T, url string, wantStatus int) map[string]any {

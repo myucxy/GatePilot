@@ -2,6 +2,22 @@
 
 ## 1. 服务端详细设计
 
+### 1.0 当前实现边界
+
+当前代码已将 HTTP Handler 与数据访问拆出 Store 边界：
+
+- Handler 只负责 HTTP 路由、请求解析、响应 envelope 和错误码映射。
+- Store 负责设备激活、Agent 注册、会话创建、审批创建、审批决策、投递 ACK 和列表查询。
+- 默认实现仍是 `memoryStore`，用于本地并行开发和端到端冒烟。
+- PostgreSQL Store 必须复用同一接口，不能让 Handler 直接拼 SQL 或绕过状态机。
+
+设计要求：
+
+- 所有状态转移必须在 Store 层以单个事务完成。
+- `waiting_decision -> delivering -> delivered/delivery_failed` 必须保持原子更新，避免决策已返回但投递记录未创建。
+- ACK 只能命中当前有效 `delivery_id`，不允许旧投递覆盖新状态。
+- HTTP 层返回结构必须继续符合 `schema/openapi.yaml`。
+
 ### 1.1 认证与租户模块
 
 职责：

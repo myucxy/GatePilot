@@ -611,3 +611,29 @@ erDiagram
 - 使用 Go 迁移工具，例如 `golang-migrate` 或 `atlas`。
 - 每次迁移必须可回滚，涉及大表变更时采用分阶段迁移。
 - 所有状态枚举先用 `varchar + check constraint`，避免 PostgreSQL enum 后续变更困难。
+
+### 6.1 当前迁移落地状态
+
+当前仓库已提供首个核心迁移：
+
+- `server/migrations/0001_core_schema.up.sql`
+- `server/migrations/0001_core_schema.down.sql`
+
+该迁移覆盖 M1-M3 主链路所需的最小持久化表：
+
+- `tenants`
+- `device_activation_codes`
+- `devices`
+- `device_tokens`
+- `sessions`
+- `approval_requests`
+- `approval_deliveries`
+- `approval_actions`
+- `audit_logs`
+
+当前 Go Server 默认仍使用 `memoryStore`，迁移文件先作为 PostgreSQL Store 的稳定结构基线。后续接入数据库实现时必须遵守：
+
+- 激活码消费、设备创建、设备 token 创建必须在同一事务中提交。
+- 审批决策必须同时更新 `approval_requests` 并创建当前有效 `approval_deliveries`。
+- Agent ACK 必须用 `approval_id + delivery_id + session_id` 匹配当前投递，旧 ACK 不得覆盖新状态。
+- `approval_requests` 是审批最终事实来源，`approval_deliveries` 记录投递尝试和 ACK 结果。

@@ -137,6 +137,21 @@ cd server
 go run ./cmd/migrate up
 ```
 
+当前仓库已先提供 SQL 迁移文件，迁移命令实现尚未接入：
+
+```text
+server/migrations/0001_core_schema.up.sql
+server/migrations/0001_core_schema.down.sql
+```
+
+在 `cmd/migrate` 完成前，开发者可用 PostgreSQL 客户端手工执行 `*.up.sql` 验证结构。任何新增表、字段、索引、状态转移持久化要求，都必须同时更新 `docs/05-data-model.md` 和迁移文件。
+
+迁移文件基础完整性校验：
+
+```powershell
+.\scripts\validate-migrations.ps1
+```
+
 ### 7.3 Server
 
 ```bash
