@@ -556,6 +556,35 @@ func TestAgentWebSocketHelloAndHeartbeat(t *testing.T) {
 	}
 }
 
+func TestStaleDeviceWorkerMarksDeviceOffline(t *testing.T) {
+	resetTestStore()
+	server := httptest.NewServer(newRouter())
+	defer server.Close()
+
+	code := createTestActivationCode(t, server.URL)
+	deviceID := registerTestDevice(t, server.URL, code)
+
+	memory, ok := store.(*memoryStore)
+	if !ok {
+		t.Fatal("test requires memory store")
+	}
+	memory.mu.Lock()
+	item := memory.devices[deviceID]
+	item.LastSeen = time.Now().UTC().Add(-5 * time.Minute).Format(time.RFC3339)
+	memory.devices[deviceID] = item
+	memory.mu.Unlock()
+
+	changed := store.MarkStaleDevicesOffline(time.Now().UTC(), 3*time.Minute)
+	if len(changed) != 1 || changed[0].DeviceID != deviceID || changed[0].Status != "offline" {
+		t.Fatalf("changed devices = %+v, want offline device %s", changed, deviceID)
+	}
+	devices := getJSON(t, server.URL+"/api/v1/tenants/"+testTenantID+"/devices", http.StatusOK)
+	items := dataItems(t, devices)
+	if items[0]["status"] != "offline" {
+		t.Fatalf("device status = %v, want offline", items[0]["status"])
+	}
+}
+
 func TestApprovalDecisionIsDeliveredOverAgentWebSocket(t *testing.T) {
 	resetTestStore()
 	server := httptest.NewServer(newRouter())

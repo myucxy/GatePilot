@@ -219,6 +219,7 @@ type gatePilotStore interface {
 	CanApproveDevice(tenantID string, deviceID string, userID string) bool
 	RegisterPushToken(clientInstanceID string, req registerPushTokenRequest, now time.Time) (clientInstance, *appError)
 	ExpireApprovals(now time.Time) []approval
+	MarkStaleDevicesOffline(now time.Time, offlineAfter time.Duration) []device
 	AppendAuditLog(item auditLog, now time.Time)
 	ListAuditLogs(tenantID string) []auditLog
 	GetSession(sessionID string) (session, *appError)
@@ -722,6 +723,25 @@ func (s *memoryStore) ExpireApprovals(now time.Time) []approval {
 	return expired
 }
 
+func (s *memoryStore) MarkStaleDevicesOffline(now time.Time, offlineAfter time.Duration) []device {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	changed := []device{}
+	for _, item := range s.devices {
+		if item.Status != "active" {
+			continue
+		}
+		lastSeen, err := time.Parse(time.RFC3339, item.LastSeen)
+		if err != nil || now.Sub(lastSeen) < offlineAfter {
+			continue
+		}
+		item.Status = "offline"
+		s.devices[item.DeviceID] = item
+		changed = append(changed, item)
+	}
+	return changed
+}
+
 func (s *memoryStore) AppendAuditLog(item auditLog, now time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -936,6 +956,20 @@ func runExpiryWorkerOnce() {
 	for _, item := range store.ExpireApprovals(time.Now().UTC()) {
 		pushApprovalDecisionToAgent(item)
 		pushApprovalUpdatedToClients(item)
+	}
+	offlineAfter := 3 * time.Minute
+	if value := os.Getenv("GATEPILOT_DEVICE_OFFLINE_SECONDS"); value != "" {
+		if seconds, err := strconv.Atoi(value); err == nil && seconds > 0 {
+			offlineAfter = time.Duration(seconds) * time.Second
+		}
+	}
+	for _, item := range store.MarkStaleDevicesOffline(time.Now().UTC(), offlineAfter) {
+		clientHub.broadcast(item.TenantID, newWSEnvelope("device.status_changed", "tr_worker", map[string]any{
+			"tenant_id":    item.TenantID,
+			"device_id":    item.DeviceID,
+			"status":       item.Status,
+			"last_seen_at": item.LastSeen,
+		}))
 	}
 }
 

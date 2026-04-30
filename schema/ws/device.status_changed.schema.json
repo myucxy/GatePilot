@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://gatepilot.local/schema/ws/device.status_changed.schema.json",
+  "title": "device.status_changed",
+  "allOf": [
+    { "$ref": "envelope.schema.json" },
+    {
+      "type": "object",
+      "properties": {
+        "type": { "const": "device.status_changed" },
+        "payload": {
+          "type": "object",
+          "required": ["tenant_id", "device_id", "status", "last_seen_at"],
+          "properties": {
+            "tenant_id": { "type": "string" },
+            "device_id": { "type": "string" },
+            "status": { "enum": ["active", "offline", "suspect_offline", "disabled"] },
+            "last_seen_at": { "type": "string", "format": "date-time" }
+          },
+          "additionalProperties": false
+        }
+      }
+    }
+  ]
+}
