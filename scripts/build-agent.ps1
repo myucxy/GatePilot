@@ -46,10 +46,6 @@ if (Test-Path $distRoot) {
     Remove-Item -Path (Join-Path $distRoot "*") -Recurse -Force
 }
 New-Item -ItemType Directory -Force -Path $distRoot | Out-Null
-& $go build -trimpath -ldflags "-s -w" -o (Join-Path $distRoot "gatepilot-agent.exe") "$repoRoot\agent\cmd\agent"
-if ($LASTEXITCODE -ne 0) {
-    throw "agent build failed"
-}
 & $go build -trimpath -ldflags "-s -w" -o (Join-Path $distRoot "gp.exe") "$repoRoot\agent\cmd\gp"
 if ($LASTEXITCODE -ne 0) {
     throw "gp build failed"
@@ -68,64 +64,35 @@ finally {
 Copy-Item -LiteralPath (Join-Path $repoRoot "agent\desktop\build\bin\gatepilot-agent-desktop.exe") -Destination (Join-Path $distRoot "gatepilot-agent-desktop.exe") -Force
 
 $readme = @'
-# GatePilot Agent Windows AMD64
+# GatePilot Windows AMD64
 
-桌面客户端：
+本包只包含桌面版和 gp 命令：
+
+- `gatepilot-agent-desktop.exe`：桌面客户端，同时提供本地提醒、确认和历史接口。
+- `gp.exe`：AI CLI 托管入口，用于启动 Codex 或 Claude，并把确认请求交给桌面版处理。
+
+启动桌面版：
 
 ```powershell
 .\gatepilot-agent-desktop.exe
 ```
 
-桌面客户端会自动启动或连接 `gatepilot-agent.exe tray`。日常配置、登录、离线模式、提醒开关、AI 工具历史来源和会话历史都在桌面客户端里完成，不需要打开网页。
+桌面版启动后会在本机提供 `127.0.0.1:18731` 本地接口。日常配置、登录、离线模式、提醒开关、AI 工具历史来源、GP 子进程和会话历史都在桌面客户端里完成，不需要打开网页，也不再需要单独的 `gatepilot-agent.exe`。
 
-双击 `gatepilot-agent.exe` 会启动托盘 Agent，并打开桌面客户端设置页。托盘菜单里的设置、登录和会话历史也都会打开 `gatepilot-agent-desktop.exe`，不会再弹出浏览器网页。
-
-本地托管 Codex/Claude：
+托管 Codex/Claude：
 
 ```powershell
 .\gp.exe codex
 .\gp.exe claude
-.\gatepilot-agent.exe codex
-.\gatepilot-agent.exe claude
-.\gatepilot-agent.exe install-gp
 ```
 
-运行 `install-gp` 后，新打开的终端可以使用：
+如果桌面版没有运行，`gp.exe` 会自动启动同目录的 `gatepilot-agent-desktop.exe`。确认请求会通过桌面版弹窗处理，最终写回当前 CLI。
+
+需要全局使用 `gp` 时，把当前目录加入用户 PATH，之后新打开的终端可以使用：
 
 ```powershell
 gp codex
 gp claude
-```
-
-离线本地确认：
-
-```powershell
-.\gatepilot-agent.exe
-.\gatepilot-agent.exe tray
-.\gatepilot-agent.exe run --local-only -- fake-ai-cli
-.\gatepilot-agent.exe run --local-only --decision approve -- fake-ai-cli
-.\gatepilot-agent.exe run --local-only --popup -- fake-ai-cli
-.\gatepilot-agent.exe run --local-only --cli-type codex -- codex
-.\gatepilot-agent.exe run --local-only --cli-type claude_code -- claude
-.\gatepilot-agent.exe status
-.\gatepilot-agent.exe settings --notification-enabled true --notification-style mini_window
-.\gatepilot-agent.exe settings --start-on-login true
-.\gatepilot-agent.exe open-settings
-.\gatepilot-agent.exe open-history
-.\gatepilot-agent.exe history
-.\gatepilot-agent.exe history --cli-type codex --status running --limit 20
-.\gatepilot-agent.exe reply --session-id <session_id> --text "continue"
-.\gatepilot-agent.exe login --server-url <url> --tenant-id <tenant_id> --device-id <device_id>
-.\gatepilot-agent.exe offline
-.\gatepilot-agent.exe logout
-```
-
-服务端联动模式：
-
-```powershell
-.\gatepilot-agent.exe register --activation-code <code>
-.\gatepilot-agent.exe local-ui --tenant-id <tenant_id> --device-id <device_id>
-.\gatepilot-agent.exe run -- fake-ai-cli
 ```
 '@
 $readme | Set-Content -Path (Join-Path $distRoot "README.md") -Encoding UTF8
@@ -136,7 +103,6 @@ if (Test-Path $packagePath) {
 Compress-Archive -Path (Join-Path $distRoot "*") -DestinationPath $packagePath
 
 [pscustomobject]@{
-    executable = Join-Path $distRoot "gatepilot-agent.exe"
     gp = Join-Path $distRoot "gp.exe"
     desktop = Join-Path $distRoot "gatepilot-agent-desktop.exe"
     package = $packagePath

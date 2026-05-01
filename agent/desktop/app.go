@@ -9,8 +9,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -143,25 +141,7 @@ func (a *App) startup(ctx context.Context) {
 }
 
 func (a *App) EnsureAgent() error {
-	if trayHealthy() {
-		return nil
-	}
-	exe, err := coreAgentPath()
-	if err != nil {
-		return err
-	}
-	cmd := exec.Command(exe, "tray")
-	applyHiddenWindow(cmd)
-	if err := cmd.Start(); err != nil {
-		return err
-	}
-	for i := 0; i < 40; i++ {
-		if trayHealthy() {
-			return nil
-		}
-		time.Sleep(150 * time.Millisecond)
-	}
-	return fmt.Errorf("agent tray did not become ready")
+	return startLocalRuntime()
 }
 
 func (a *App) InitialView() string {
@@ -307,28 +287,6 @@ func (a *App) ContinueAIToolSession(toolID string, sessionID string) error {
 
 func (a *App) DeleteAIToolSession(toolID string, sessionID string) error {
 	return requestJSON(http.MethodDelete, aiToolSessionPath("/api/local/ai-tool-session", toolID, sessionID), nil, nil)
-}
-
-func coreAgentPath() (string, error) {
-	if path := os.Getenv("GATEPILOT_AGENT_EXE"); path != "" {
-		return path, nil
-	}
-	self, err := os.Executable()
-	if err != nil {
-		return "", err
-	}
-	dir := filepath.Dir(self)
-	candidates := []string{
-		filepath.Join(dir, "gatepilot-agent.exe"),
-		filepath.Join(dir, "gatepilot-agent"),
-		filepath.Join(dir, "..", "gatepilot-agent-windows-amd64", "gatepilot-agent.exe"),
-	}
-	for _, candidate := range candidates {
-		if _, err := os.Stat(candidate); err == nil {
-			return candidate, nil
-		}
-	}
-	return "", fmt.Errorf("gatepilot-agent executable not found next to desktop app")
 }
 
 func trayHealthy() bool {

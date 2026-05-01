@@ -411,17 +411,17 @@ func ensureTrayRunning() {
 	if trayHealthy(client) {
 		return
 	}
-	agentExe, err := findAgentExecutable()
+	exe, args, err := findLocalRuntimeCommand()
 	if err != nil {
 		return
 	}
-	cmd := exec.Command(agentExe, "tray")
+	cmd := exec.Command(exe, args...)
 	applyHiddenWindow(cmd)
 	if err := cmd.Start(); err != nil {
 		return
 	}
-	for i := 0; i < 20; i++ {
-		time.Sleep(150 * time.Millisecond)
+	for i := 0; i < 60; i++ {
+		time.Sleep(250 * time.Millisecond)
 		if trayHealthy(client) {
 			return
 		}
@@ -437,26 +437,37 @@ func trayHealthy(client http.Client) bool {
 	return resp.StatusCode == http.StatusOK
 }
 
-func findAgentExecutable() (string, error) {
+func findLocalRuntimeCommand() (string, []string, error) {
 	self, err := os.Executable()
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	selfDir := filepath.Dir(self)
-	name := "gatepilot-agent"
+	desktopName := "gatepilot-agent-desktop"
+	agentName := "gatepilot-agent"
 	if runtime.GOOS == "windows" {
-		name += ".exe"
+		desktopName += ".exe"
+		agentName += ".exe"
 	}
-	candidates := []string{
-		filepath.Join(selfDir, name),
-		filepath.Join(selfDir, "..", "gatepilot-agent-windows-amd64", name),
+	desktopCandidates := []string{
+		filepath.Join(selfDir, desktopName),
+		filepath.Join(selfDir, "..", "gatepilot-agent-windows-amd64", desktopName),
 	}
-	for _, candidate := range candidates {
+	for _, candidate := range desktopCandidates {
 		if _, err := os.Stat(candidate); err == nil {
-			return candidate, nil
+			return candidate, nil, nil
 		}
 	}
-	return "", fmt.Errorf("%s not found next to gp", name)
+	agentCandidates := []string{
+		filepath.Join(selfDir, agentName),
+		filepath.Join(selfDir, "..", "gatepilot-agent-windows-amd64", agentName),
+	}
+	for _, candidate := range agentCandidates {
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate, []string{"tray"}, nil
+		}
+	}
+	return "", nil, fmt.Errorf("%s not found next to gp", desktopName)
 }
 
 func trayListenAddress() string {
