@@ -5,6 +5,7 @@ Minimal M0 Agent skeleton.
 Built-in adapter coverage now includes `custom`, `codex`, `claude_code`, `opencode`, `copilot`, and `gemini` prompt detection plus decision input mapping tests.
 
 ```powershell
+D:\Dev\Env\Go\bin\go.exe run .\cmd\agent
 D:\Dev\Env\Go\bin\go.exe run .\cmd\agent version
 D:\Dev\Env\Go\bin\go.exe run .\cmd\agent register --activation-code <code>
 D:\Dev\Env\Go\bin\go.exe run .\cmd\agent connect --device-id <device_id> --once
@@ -16,6 +17,7 @@ D:\Dev\Env\Go\bin\go.exe run .\cmd\agent tray
 D:\Dev\Env\Go\bin\go.exe run .\cmd\agent status
 D:\Dev\Env\Go\bin\go.exe run .\cmd\agent settings --notification-enabled true --notification-style mini_window
 D:\Dev\Env\Go\bin\go.exe run .\cmd\agent settings --start-on-login true
+D:\Dev\Env\Go\bin\go.exe run .\cmd\agent open-settings
 D:\Dev\Env\Go\bin\go.exe run .\cmd\agent open-history
 D:\Dev\Env\Go\bin\go.exe run .\cmd\agent history
 D:\Dev\Env\Go\bin\go.exe run .\cmd\agent history --cli-type codex --status running --limit 20
@@ -35,11 +37,11 @@ D:\Dev\Env\Go\bin\go.exe run .\cmd\agent run-fake
 
 `run --local-only` does not require registration or a server. It detects a local CLI approval prompt, prints a local notification, asks for approve/reject/reply unless `--decision` is provided, and writes the decision directly back to the CLI. On Windows, add `--popup` to show a native Yes/No confirmation dialog; Yes maps to approve and No maps to reject.
 
-`tray` starts the Windows tray control process in offline mode by default. When it is running, `run --local-only` sends detected approvals to the tray first; the tray applies the local notification settings and returns approve/reject/reply to the session host.
+Running the agent with no arguments starts the Windows tray process and opens the settings page. `tray` starts the same tray control process without opening a page. When it is running, `run --local-only` sends detected approvals to the tray first; the tray applies the local notification settings and returns approve/reject/reply to the session host.
 
 `settings` reads or updates local desktop settings. `--start-on-login true` registers the packaged executable under the current user's Windows Run key; set it to `false` to remove that entry.
 
-`open-history` opens the tray-hosted local history page at `http://127.0.0.1:18731/ui/history`. Start `tray` first.
+`open-settings` and `open-history` open the tray-hosted settings and history pages. Start the agent or `tray` first.
 
 `history` reads the local offline session history. Use `history --session-id <session_id>` for output chunks, approvals, and decisions for one session. Use `--cli-type`, `--status`, and `--limit` to filter the session list.
 

@@ -438,6 +438,16 @@ func TestTraySessionHistoryEndpoints(t *testing.T) {
 	if uiResp.StatusCode != http.StatusOK || !strings.Contains(string(uiBody), "GatePilot Agent History") {
 		t.Fatalf("history UI status=%d body=%q, want HTML history page", uiResp.StatusCode, string(uiBody))
 	}
+
+	settingsResp, err := http.Get(server.URL + "/ui/settings")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer settingsResp.Body.Close()
+	settingsBody, _ := io.ReadAll(settingsResp.Body)
+	if settingsResp.StatusCode != http.StatusOK || !strings.Contains(string(settingsBody), "GatePilot Agent 设置") {
+		t.Fatalf("settings UI status=%d body=%q, want HTML settings page", settingsResp.StatusCode, string(settingsBody))
+	}
 }
 
 func TestSendLocalSessionInputWritesToActiveHost(t *testing.T) {

@@ -38,6 +38,7 @@ $readme = @'
 Offline local confirmation:
 
 ```powershell
+.\gatepilot-agent.exe
 .\gatepilot-agent.exe tray
 .\gatepilot-agent.exe run --local-only -- fake-ai-cli
 .\gatepilot-agent.exe run --local-only --decision approve -- fake-ai-cli
@@ -45,6 +46,7 @@ Offline local confirmation:
 .\gatepilot-agent.exe status
 .\gatepilot-agent.exe settings --notification-enabled true --notification-style mini_window
 .\gatepilot-agent.exe settings --start-on-login true
+.\gatepilot-agent.exe open-settings
 .\gatepilot-agent.exe open-history
 .\gatepilot-agent.exe history
 .\gatepilot-agent.exe history --cli-type codex --status running --limit 20
@@ -53,6 +55,8 @@ Offline local confirmation:
 .\gatepilot-agent.exe offline
 .\gatepilot-agent.exe logout
 ```
+
+Double-clicking `gatepilot-agent.exe` starts the tray agent and opens the settings UI.
 
 Server-backed local UI:
 

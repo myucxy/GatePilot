@@ -52,10 +52,12 @@ type runCLIOptions struct {
 }
 
 func main() {
-	command := "version"
-	if len(os.Args) > 1 {
-		command = os.Args[1]
+	if len(os.Args) == 1 {
+		runAgentTray([]string{"--open-settings"})
+		return
 	}
+
+	command := os.Args[1]
 
 	// M0 只保留稳定命令入口，后续 register/run/daemon 会在这里扩展子命令。
 	switch command {
@@ -83,6 +85,8 @@ func main() {
 		replyLocalSession(os.Args[2:])
 	case "settings":
 		configureAgentSettings(os.Args[2:])
+	case "open-settings":
+		openLocalSettingsUI()
 	case "open-history":
 		openLocalHistoryUI()
 	case "status":
@@ -880,10 +884,13 @@ func runAgentTray(args []string) {
 	noUI := false
 	readyFile := ""
 	duration := 0
+	openSettings := false
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--no-ui":
 			noUI = true
+		case "--open-settings":
+			openSettings = true
 		case "--ready-file":
 			if i+1 < len(args) {
 				readyFile = args[i+1]
@@ -914,6 +921,14 @@ func runAgentTray(args []string) {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
+	}
+	if openSettings {
+		go func() {
+			time.Sleep(300 * time.Millisecond)
+			if err := openBrowser("http://" + trayListenAddress() + "/ui/settings"); err != nil {
+				fmt.Fprintf(os.Stderr, "open settings failed: %v\n", err)
+			}
+		}()
 	}
 	if noUI {
 		fmt.Println(mustJSON(map[string]any{
@@ -954,7 +969,7 @@ func startTrayHTTPServer(state *trayState) (*http.Server, error) {
 func newTrayHTTPHandler(state *trayState) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ui", func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, "/ui/history", http.StatusFound)
+		http.Redirect(w, r, "/ui/settings", http.StatusFound)
 	})
 	mux.HandleFunc("/ui/history", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -963,6 +978,14 @@ func newTrayHTTPHandler(state *trayState) http.Handler {
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = w.Write([]byte(localHistoryHTML()))
+	})
+	mux.HandleFunc("/ui/settings", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte(localSettingsHTML()))
 	})
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		writeTrayJSON(w, map[string]any{"status": "ok", "mode": state.currentSettings().Mode})
@@ -1199,6 +1222,7 @@ func setupTrayMenu(state *trayState) {
 	toggleNotify := systray.AddMenuItem("关闭提醒", "Toggle local approval notifications")
 	toggleOffline := systray.AddMenuItem("切换离线/在线模式", "Toggle offline mode when login settings are present")
 	toggleStartup := systray.AddMenuItem("开启开机启动", "Toggle Windows start on login")
+	openSettingsItem := systray.AddMenuItem("打开设置", "Open local settings")
 	openHistoryItem := systray.AddMenuItem("打开会话历史", "Open local session history")
 	historyItem := systray.AddMenuItem("显示历史路径", "Print local history path")
 	settingsItem := systray.AddMenuItem("显示设置路径", "Print settings path")
@@ -1272,6 +1296,13 @@ func setupTrayMenu(state *trayState) {
 				state.setSettings(settings)
 			}
 			refresh()
+		}
+	}()
+	go func() {
+		for range openSettingsItem.ClickedCh {
+			if err := openBrowser("http://" + trayListenAddress() + "/ui/settings"); err != nil {
+				fmt.Fprintf(os.Stderr, "open settings failed: %v\n", err)
+			}
 		}
 	}()
 	go func() {
@@ -1490,6 +1521,129 @@ loadStatus();loadSessions();
 </html>`
 }
 
+func localSettingsHTML() string {
+	return `<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GatePilot Agent Settings</title>
+<style>
+:root{color-scheme:light dark;font-family:Segoe UI,Arial,sans-serif;background:#f6f8fa;color:#1f2328}
+body{margin:0}
+header{height:56px;display:flex;align-items:center;justify-content:space-between;padding:0 20px;border-bottom:1px solid #d8dee4;background:#fff}
+h1{font-size:18px;margin:0}
+main{max-width:980px;margin:0 auto;padding:18px}
+.nav{display:flex;gap:10px;align-items:center}
+a{color:#0969da;text-decoration:none}
+.panel{border:1px solid #d8dee4;border-radius:8px;background:#fff;margin-bottom:14px}
+.panel h2{font-size:15px;margin:0;padding:12px 14px;border-bottom:1px solid #eef1f4}
+.body{padding:14px}
+.grid{display:grid;grid-template-columns:220px 1fr;gap:12px 14px;align-items:center}
+label{font-size:13px;color:#57606a}
+input,select,button{font:inherit;border:1px solid #c8d0d9;border-radius:6px;background:#fff;color:#1f2328}
+input,select{height:34px;padding:0 8px;min-width:0}
+input[type=checkbox]{height:auto;width:18px}
+button{height:34px;padding:0 14px;cursor:pointer}
+button.primary{background:#116329;color:#fff;border-color:#116329}
+button.danger{background:#a40e26;color:#fff;border-color:#a40e26}
+.actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:14px}
+.status{font-size:13px;color:#57606a}
+.message{min-height:20px;margin-top:10px;font-size:13px}
+.ok{color:#116329}.err{color:#a40e26}
+code{font-family:Consolas,monospace;font-size:12px;word-break:break-all}
+@media (max-width:760px){main{padding:12px}.grid{grid-template-columns:1fr}.nav{font-size:13px}}
+@media (prefers-color-scheme:dark){:root{background:#0d1117;color:#e6edf3}header,.panel,input,select,button{background:#161b22;color:#e6edf3;border-color:#30363d}.panel h2{border-bottom-color:#30363d}label,.status{color:#8b949e}a{color:#58a6ff}.primary{background:#238636!important;border-color:#238636!important}.danger{background:#da3633!important;border-color:#da3633!important}}
+</style>
+</head>
+<body>
+<header>
+<h1>GatePilot Agent 设置</h1>
+<nav class="nav"><a href="/ui/history">会话历史</a><span id="mode" class="status"></span></nav>
+</header>
+<main>
+<section class="panel">
+<h2>本地模式与提醒</h2>
+<div class="body">
+<div class="grid">
+<label for="modeInput">运行模式</label>
+<select id="modeInput"><option value="offline">离线本地</option><option value="online">在线配置</option></select>
+<label for="notifyInput">启用提醒</label>
+<input id="notifyInput" type="checkbox">
+<label for="styleInput">提醒样式</label>
+<select id="styleInput"><option value="mini_window">右下角小窗口</option><option value="modal_popup">模态弹窗</option><option value="toast">Toast/小窗口</option><option value="none">不弹窗</option></select>
+<label for="startupInput">开机启动</label>
+<input id="startupInput" type="checkbox">
+<label for="retentionInput">历史保留天数</label>
+<input id="retentionInput" type="number" min="1" max="3650">
+<label for="captureInput">输出捕获</label>
+<select id="captureInput"><option value="summary_only">只保存摘要</option><option value="redacted_recent">保存脱敏近期输出</option><option value="full_local_only">完整本地保存</option></select>
+<label for="cliInput">默认 CLI 类型</label>
+<select id="cliInput"><option>custom</option><option>codex</option><option>claude</option><option>gemini</option><option>copilot</option><option>opencode</option></select>
+<label for="serverInput">服务端地址</label>
+<input id="serverInput" placeholder="http://127.0.0.1:8080">
+</div>
+<div class="actions"><button class="primary" id="save">保存设置</button><button id="reload">重新载入</button></div>
+<div id="settingsMsg" class="message"></div>
+</div>
+</section>
+<section class="panel">
+<h2>登录与在线配置</h2>
+<div class="body">
+<div class="grid">
+<label for="tenantInput">Tenant ID</label><input id="tenantInput">
+<label for="deviceInput">Device ID</label><input id="deviceInput">
+<label for="clientInput">Client Instance ID</label><input id="clientInput" placeholder="可留空，保存时自动注册">
+<label>当前设置文件</label><code id="settingsPath"></code>
+<label>当前历史文件</label><code id="historyPath"></code>
+</div>
+<div class="actions"><button class="primary" id="login">登录/绑定</button><button id="offline">切为离线</button><button class="danger" id="logout">退出登录</button></div>
+<div id="loginMsg" class="message"></div>
+</div>
+</section>
+</main>
+<script>
+let currentSettings=null;
+const ids=['modeInput','notifyInput','styleInput','startupInput','retentionInput','captureInput','cliInput','serverInput','tenantInput','deviceInput','clientInput'];
+function el(id){return document.getElementById(id)}
+function msg(id,text,ok=true){const x=el(id);x.textContent=text;x.className='message '+(ok?'ok':'err')}
+async function load(){
+ const r=await fetch('/api/local/status');const j=await r.json();const d=j.data;const s=d.settings;currentSettings=s;
+ el('mode').textContent=d.offline?'离线本地':'在线配置';
+ el('modeInput').value=s.mode;el('notifyInput').checked=!!s.notification_enabled;el('styleInput').value=s.notification_style;
+ el('startupInput').checked=!!s.start_on_login;el('retentionInput').value=s.history_retention_days;el('captureInput').value=s.capture_output_mode;
+ el('cliInput').value=s.default_cli_type;el('serverInput').value=s.server_url||'';el('tenantInput').value=s.tenant_id||'';
+ el('deviceInput').value=s.device_id||'';el('clientInput').value=s.client_instance_id||'';el('settingsPath').textContent=d.settings_path;el('historyPath').textContent=d.history_path;
+}
+function readSettings(){
+ return {...currentSettings,
+  mode:el('modeInput').value,start_on_login:el('startupInput').checked,notification_enabled:el('notifyInput').checked,
+  notification_style:el('styleInput').value,history_retention_days:Number(el('retentionInput').value||30),
+  capture_output_mode:el('captureInput').value,default_cli_type:el('cliInput').value,server_url:el('serverInput').value,
+  tenant_id:el('tenantInput').value,device_id:el('deviceInput').value,client_instance_id:el('clientInput').value};
+}
+async function saveSettings(){
+ const r=await fetch('/api/local/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(readSettings())});
+ if(!r.ok){msg('settingsMsg',await r.text(),false);return}
+ msg('settingsMsg','已保存');await load();
+}
+async function login(){
+ const body={server_url:el('serverInput').value,tenant_id:el('tenantInput').value,device_id:el('deviceInput').value,client_instance_id:el('clientInput').value};
+ const r=await fetch('/api/local/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+ if(!r.ok){msg('loginMsg',await r.text(),false);return}
+ msg('loginMsg','已登录/绑定');await load();
+}
+async function post(url,id,text){
+ const r=await fetch(url,{method:'POST'});if(!r.ok){msg(id,await r.text(),false);return}msg(id,text);await load();
+}
+el('save').onclick=saveSettings;el('reload').onclick=load;el('login').onclick=login;
+el('offline').onclick=()=>post('/api/local/offline','loginMsg','已切为离线');el('logout').onclick=()=>post('/api/local/logout','loginMsg','已退出登录');
+load().catch(e=>msg('settingsMsg',String(e),false));
+</script>
+</body>
+</html>`
+}
+
 func intQueryParam(r *http.Request, key string) int {
 	value := strings.TrimSpace(r.URL.Query().Get(key))
 	if value == "" {
@@ -1597,6 +1751,18 @@ func openLocalHistoryUI() {
 	}
 	fmt.Println(mustJSON(map[string]any{
 		"type": "agent.history_opened",
+		"url":  target,
+	}))
+}
+
+func openLocalSettingsUI() {
+	target := "http://" + trayListenAddress() + "/ui/settings"
+	if err := openBrowser(target); err != nil {
+		fmt.Fprintf(os.Stderr, "open settings failed: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Println(mustJSON(map[string]any{
+		"type": "agent.settings_opened",
 		"url":  target,
 	}))
 }
