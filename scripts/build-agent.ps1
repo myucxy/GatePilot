@@ -37,6 +37,7 @@ Offline local confirmation:
 ```powershell
 .\gatepilot-agent.exe run --local-only -- fake-ai-cli
 .\gatepilot-agent.exe run --local-only --decision approve -- fake-ai-cli
+.\gatepilot-agent.exe run --local-only --popup -- fake-ai-cli
 ```
 
 Server-backed local UI:

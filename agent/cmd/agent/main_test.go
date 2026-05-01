@@ -183,13 +183,33 @@ func TestLocalDecisionInputRejectsUnsupportedDecision(t *testing.T) {
 func TestParseRunCLIOptionsSupportsLocalOnly(t *testing.T) {
 	options := parseRunCLIOptions([]string{
 		"--local-only",
+		"--popup",
 		"--decision", "reject",
 		"--payload", "no",
 		"--cli-type", "codex",
 		"--", "codex",
 	})
-	if !options.LocalOnly || options.Decision != "reject" || options.Payload != "no" || options.CLIType != "codex" || options.CommandLine != "codex" {
+	if !options.LocalOnly || !options.Popup || options.Decision != "reject" || options.Payload != "no" || options.CLIType != "codex" || options.CommandLine != "codex" {
 		t.Fatalf("options = %+v, want local-only codex reject", options)
+	}
+}
+
+func TestLocalDecisionInputUsesPopupDecisionOverride(t *testing.T) {
+	t.Setenv("GATEPILOT_AGENT_POPUP_DECISION", "reject")
+	var output bytes.Buffer
+	decision, payload, err := localDecisionInput(localUIOptions{
+		Popup:     true,
+		PopupText: "allow command?",
+		Payload:   "blocked",
+	}, strings.NewReader(""), &output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decision != "reject" || payload != "blocked" {
+		t.Fatalf("decision=%q payload=%q, want popup reject payload", decision, payload)
+	}
+	if !strings.Contains(output.String(), "local_ui.popup_decision") {
+		t.Fatalf("output = %q, want popup decision event", output.String())
 	}
 }
 
