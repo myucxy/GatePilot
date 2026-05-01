@@ -72,25 +72,27 @@ type session struct {
 }
 
 type approval struct {
-	ApprovalID      string            `json:"approval_id"`
-	IdempotencyKey  string            `json:"-"`
-	TenantID        string            `json:"tenant_id"`
-	DeviceID        string            `json:"device_id"`
-	SessionID       string            `json:"session_id"`
-	CLIType         string            `json:"cli_type"`
-	EventType       string            `json:"event_type"`
-	RiskLevel       string            `json:"risk_level"`
-	PromptText      string            `json:"prompt_text"`
-	ContextBefore   string            `json:"context_before"`
-	Status          string            `json:"status"`
-	DecisionType    string            `json:"decision_type"`
-	DecisionPayload string            `json:"decision_payload"`
-	DeliveryID      string            `json:"delivery_id"`
-	DeliveryStatus  string            `json:"delivery_status"`
-	DecidedBy       map[string]string `json:"decided_by"`
-	DecidedAt       string            `json:"decided_at"`
-	CreatedAt       string            `json:"created_at"`
-	ExpiresAt       string            `json:"expires_at"`
+	ApprovalID       string            `json:"approval_id"`
+	IdempotencyKey   string            `json:"-"`
+	TenantID         string            `json:"tenant_id"`
+	DeviceID         string            `json:"device_id"`
+	SessionID        string            `json:"session_id"`
+	CLIType          string            `json:"cli_type"`
+	EventType        string            `json:"event_type"`
+	RiskLevel        string            `json:"risk_level"`
+	PromptText       string            `json:"prompt_text"`
+	ContextBefore    string            `json:"context_before"`
+	Status           string            `json:"status"`
+	DecisionType     string            `json:"decision_type"`
+	DecisionPayload  string            `json:"decision_payload"`
+	DeliveryID       string            `json:"delivery_id"`
+	DeliveryStatus   string            `json:"delivery_status"`
+	DeliveryAttempts int               `json:"-"`
+	DeliverySentAt   string            `json:"-"`
+	DecidedBy        map[string]string `json:"decided_by"`
+	DecidedAt        string            `json:"decided_at"`
+	CreatedAt        string            `json:"created_at"`
+	ExpiresAt        string            `json:"expires_at"`
 }
 
 type clientInstance struct {
@@ -277,6 +279,7 @@ type gatePilotStore interface {
 	CanApproveDevice(tenantID string, deviceID string, userID string) bool
 	RegisterPushToken(clientInstanceID string, req registerPushTokenRequest, now time.Time) (clientInstance, *appError)
 	ExpireApprovals(now time.Time) []approval
+	RetryDeliveries(now time.Time, ackTimeout time.Duration, maxAttempts int) ([]approval, []approval)
 	MarkStaleDevices(now time.Time, suspectAfter time.Duration, offlineAfter time.Duration) []device
 	AppendAuditLog(item auditLog, now time.Time)
 	ListAuditLogs(req auditLogListRequest) []auditLog
@@ -754,6 +757,8 @@ func (s *memoryStore) SubmitApprovalDecision(approvalID string, req submitApprov
 	item.DecisionPayload = req.Payload
 	item.DeliveryID = randomUUID()
 	item.DeliveryStatus = "sent"
+	item.DeliveryAttempts = 1
+	item.DeliverySentAt = now.Format(time.RFC3339)
 	item.DecidedBy = decidedBy
 	item.DecidedAt = now.Format(time.RFC3339)
 	s.approvals[approvalID] = item
@@ -917,6 +922,8 @@ func (s *memoryStore) ExpireApprovals(now time.Time) []approval {
 		item.DecisionPayload = "timeout"
 		item.DeliveryID = randomUUID()
 		item.DeliveryStatus = "sent"
+		item.DeliveryAttempts = 1
+		item.DeliverySentAt = now.Format(time.RFC3339)
 		item.DecidedAt = now.Format(time.RFC3339)
 		item.DecidedBy = map[string]string{
 			"actor_type":   "system",
@@ -946,6 +953,61 @@ func (s *memoryStore) ExpireApprovals(now time.Time) []approval {
 		expired = append(expired, item)
 	}
 	return expired
+}
+
+func (s *memoryStore) RetryDeliveries(now time.Time, ackTimeout time.Duration, maxAttempts int) ([]approval, []approval) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if maxAttempts <= 0 {
+		maxAttempts = 3
+	}
+	retry := []approval{}
+	failed := []approval{}
+	for _, item := range s.approvals {
+		if item.Status != "delivering" || item.DeliveryStatus != "sent" {
+			continue
+		}
+		sentAt, err := time.Parse(time.RFC3339, item.DeliverySentAt)
+		if err != nil {
+			sentAt = now.Add(-ackTimeout)
+		}
+		if now.Sub(sentAt) < ackTimeout {
+			continue
+		}
+		if item.DeliveryAttempts >= maxAttempts {
+			item.Status = "delivery_failed"
+			item.DeliveryStatus = "failed"
+			s.approvals[item.ApprovalID] = item
+			if sessionItem, ok := s.sessions[item.SessionID]; ok {
+				sessionItem.Status = "running"
+				if sessionItem.PendingApprovals > 0 {
+					sessionItem.PendingApprovals--
+				}
+				sessionItem.LastOutputSummary = "approval delivery_failed"
+				s.sessions[item.SessionID] = sessionItem
+			}
+			s.auditLogs = append(s.auditLogs, auditLog{
+				AuditID:      int64(len(s.auditLogs) + 1),
+				TenantID:     item.TenantID,
+				ActorType:    "system",
+				ActorID:      "delivery-worker",
+				Action:       "delivery.retry_exhausted",
+				ResourceType: "approval",
+				ResourceID:   item.ApprovalID,
+				Result:       "failed",
+				TraceID:      "tr_worker",
+				Detail:       map[string]any{"delivery_id": item.DeliveryID, "attempt_count": item.DeliveryAttempts},
+				CreatedAt:    now.Format(time.RFC3339),
+			})
+			failed = append(failed, item)
+			continue
+		}
+		item.DeliveryAttempts++
+		item.DeliverySentAt = now.Format(time.RFC3339)
+		s.approvals[item.ApprovalID] = item
+		retry = append(retry, item)
+	}
+	return retry, failed
 }
 
 func (s *memoryStore) MarkStaleDevices(now time.Time, suspectAfter time.Duration, offlineAfter time.Duration) []device {
@@ -1350,8 +1412,31 @@ func startWorkersFromEnv() {
 }
 
 func runExpiryWorkerOnce() {
-	for _, item := range store.ExpireApprovals(time.Now().UTC()) {
+	now := time.Now().UTC()
+	for _, item := range store.ExpireApprovals(now) {
 		pushApprovalDecisionToAgent(item)
+		pushApprovalUpdatedToClients(item)
+		if sessionItem, appErr := store.GetSession(item.SessionID); appErr == nil {
+			pushSessionUpdatedToClients(sessionItem)
+		}
+	}
+	ackTimeout := 30 * time.Second
+	if value := os.Getenv("GATEPILOT_DELIVERY_ACK_TIMEOUT_SECONDS"); value != "" {
+		if seconds, err := strconv.Atoi(value); err == nil && seconds > 0 {
+			ackTimeout = time.Duration(seconds) * time.Second
+		}
+	}
+	maxAttempts := 3
+	if value := os.Getenv("GATEPILOT_DELIVERY_MAX_ATTEMPTS"); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 {
+			maxAttempts = parsed
+		}
+	}
+	retryDeliveries, failedDeliveries := store.RetryDeliveries(now, ackTimeout, maxAttempts)
+	for _, item := range retryDeliveries {
+		pushApprovalDecisionToAgent(item)
+	}
+	for _, item := range failedDeliveries {
 		pushApprovalUpdatedToClients(item)
 		if sessionItem, appErr := store.GetSession(item.SessionID); appErr == nil {
 			pushSessionUpdatedToClients(sessionItem)

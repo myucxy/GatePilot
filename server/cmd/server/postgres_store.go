@@ -1072,6 +1072,103 @@ VALUES ($1, 'system', NULL, 'approval.timeout_reject', 'approval', $2, 'success'
 	return expired
 }
 
+func (s *postgresStore) RetryDeliveries(now time.Time, ackTimeout time.Duration, maxAttempts int) ([]approval, []approval) {
+	if maxAttempts <= 0 {
+		maxAttempts = 3
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return []approval{}, []approval{}
+	}
+	defer tx.Rollback()
+
+	rows, err := tx.QueryContext(ctx, `
+SELECT ar.id::text, ad.id::text, ad.attempt_count
+FROM approval_requests ar
+JOIN approval_deliveries ad ON ad.approval_id = ar.id
+WHERE ar.status = 'delivering'
+  AND ad.status = 'sent'
+  AND ad.sent_at <= $1
+ORDER BY ad.sent_at ASC
+FOR UPDATE OF ar, ad`, now.Add(-ackTimeout))
+	if err != nil {
+		return []approval{}, []approval{}
+	}
+	type candidate struct {
+		approvalID   string
+		deliveryID   string
+		attemptCount int
+	}
+	candidates := []candidate{}
+	for rows.Next() {
+		var item candidate
+		if err := rows.Scan(&item.approvalID, &item.deliveryID, &item.attemptCount); err != nil {
+			rows.Close()
+			return []approval{}, []approval{}
+		}
+		candidates = append(candidates, item)
+	}
+	rows.Close()
+
+	retry := []approval{}
+	failed := []approval{}
+	for _, candidate := range candidates {
+		if candidate.attemptCount >= maxAttempts {
+			if _, err := tx.ExecContext(ctx, `
+UPDATE approval_requests SET status = 'delivery_failed', updated_at = $1 WHERE id = $2`, now, candidate.approvalID); err != nil {
+				return []approval{}, []approval{}
+			}
+			if _, err := tx.ExecContext(ctx, `
+UPDATE approval_deliveries
+SET status = 'failed', updated_at = $1
+WHERE id = $2`, now, candidate.deliveryID); err != nil {
+				return []approval{}, []approval{}
+			}
+			if _, err := tx.ExecContext(ctx, `
+UPDATE sessions
+SET status = 'running',
+    pending_approval_count = GREATEST(pending_approval_count - 1, 0),
+    last_output_summary = 'approval delivery_failed'
+WHERE id = (SELECT session_id FROM approval_requests WHERE id = $1)`, candidate.approvalID); err != nil {
+				return []approval{}, []approval{}
+			}
+			if _, err := tx.ExecContext(ctx, `
+INSERT INTO audit_logs(tenant_id, actor_type, actor_id, action, resource_type, resource_id, result, trace_id, detail, created_at)
+SELECT tenant_id, 'system', NULL, 'delivery.retry_exhausted', 'approval', id, 'failed', 'tr_worker',
+       jsonb_build_object('delivery_id', $1::text, 'attempt_count', $2::int), $3
+FROM approval_requests
+WHERE id = $4`, candidate.deliveryID, candidate.attemptCount, now, candidate.approvalID); err != nil {
+				return []approval{}, []approval{}
+			}
+			item, appErr := s.findApprovalByID(ctx, tx, candidate.approvalID)
+			if appErr != nil {
+				return []approval{}, []approval{}
+			}
+			failed = append(failed, item)
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, `
+UPDATE approval_deliveries
+SET attempt_count = attempt_count + 1,
+    sent_at = $1,
+    updated_at = $1
+WHERE id = $2`, now, candidate.deliveryID); err != nil {
+			return []approval{}, []approval{}
+		}
+		item, appErr := s.findApprovalByID(ctx, tx, candidate.approvalID)
+		if appErr != nil {
+			return []approval{}, []approval{}
+		}
+		retry = append(retry, item)
+	}
+	if err := tx.Commit(); err != nil {
+		return []approval{}, []approval{}
+	}
+	return retry, failed
+}
+
 func (s *postgresStore) MarkStaleDevices(now time.Time, suspectAfter time.Duration, offlineAfter time.Duration) []device {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -1554,6 +1651,8 @@ SELECT ar.id::text, ar.tenant_id::text, ar.device_id::text, ar.session_id::text,
        ar.prompt_text, ar.context_before, ar.status, ar.decision_type, ar.decision_payload,
        COALESCE((SELECT id::text FROM approval_deliveries WHERE approval_id = ar.id ORDER BY created_at DESC LIMIT 1), '') AS delivery_id,
        COALESCE((SELECT status FROM approval_deliveries WHERE approval_id = ar.id ORDER BY created_at DESC LIMIT 1), 'pending') AS delivery_status,
+       COALESCE((SELECT attempt_count FROM approval_deliveries WHERE approval_id = ar.id ORDER BY created_at DESC LIMIT 1), 0) AS delivery_attempts,
+       (SELECT sent_at FROM approval_deliveries WHERE approval_id = ar.id ORDER BY created_at DESC LIMIT 1) AS delivery_sent_at,
        ar.decided_by::text, ar.decided_at, ar.created_at, ar.expires_at
 FROM approval_requests ar
 `
@@ -1631,10 +1730,11 @@ func scanApproval(scanner approvalScanner) (approval, error) {
 	var item approval
 	var decidedByJSON string
 	var decidedAt sql.NullTime
+	var deliverySentAt sql.NullTime
 	var createdAt, expiresAt time.Time
 	err := scanner.Scan(&item.ApprovalID, &item.TenantID, &item.DeviceID, &item.SessionID, &item.CLIType, &item.EventType, &item.RiskLevel,
 		&item.PromptText, &item.ContextBefore, &item.Status, &item.DecisionType, &item.DecisionPayload, &item.DeliveryID, &item.DeliveryStatus,
-		&decidedByJSON, &decidedAt, &createdAt, &expiresAt)
+		&item.DeliveryAttempts, &deliverySentAt, &decidedByJSON, &decidedAt, &createdAt, &expiresAt)
 	if err != nil {
 		return approval{}, err
 	}
@@ -1646,6 +1746,9 @@ func scanApproval(scanner approvalScanner) (approval, error) {
 	}
 	if decidedAt.Valid {
 		item.DecidedAt = decidedAt.Time.Format(time.RFC3339)
+	}
+	if deliverySentAt.Valid {
+		item.DeliverySentAt = deliverySentAt.Time.Format(time.RFC3339)
 	}
 	item.CreatedAt = createdAt.Format(time.RFC3339)
 	item.ExpiresAt = expiresAt.Format(time.RFC3339)

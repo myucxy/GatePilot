@@ -129,6 +129,58 @@ func TestApprovalAckFailureMarksDeliveryFailed(t *testing.T) {
 	}
 }
 
+func TestDeliveryRetryMarksExhaustedDeliveryFailed(t *testing.T) {
+	resetTestStore()
+	server := httptest.NewServer(newRouter())
+	defer server.Close()
+
+	code := createTestActivationCode(t, server.URL)
+	deviceID := registerTestDevice(t, server.URL, code)
+	sessionID := createTestSession(t, server.URL, deviceID)
+	approvalID := createTestApproval(t, server.URL, deviceID, sessionID)
+	postJSON(t, server.URL+"/api/v1/approvals/"+approvalID+"/decision", map[string]any{
+		"decision_type": "approve",
+	}, http.StatusOK)
+
+	memory, ok := store.(*memoryStore)
+	if !ok {
+		t.Fatal("test requires memory store")
+	}
+	memory.mu.Lock()
+	item := memory.approvals[approvalID]
+	item.DeliveryAttempts = 1
+	item.DeliverySentAt = time.Now().UTC().Add(-time.Minute).Format(time.RFC3339)
+	memory.approvals[approvalID] = item
+	memory.mu.Unlock()
+
+	retry, failed := store.RetryDeliveries(time.Now().UTC(), 30*time.Second, 2)
+	if len(retry) != 1 || retry[0].ApprovalID != approvalID || retry[0].DeliveryAttempts != 2 || len(failed) != 0 {
+		t.Fatalf("retry=%+v failed=%+v, want one retry attempt", retry, failed)
+	}
+
+	memory.mu.Lock()
+	item = memory.approvals[approvalID]
+	item.DeliverySentAt = time.Now().UTC().Add(-time.Minute).Format(time.RFC3339)
+	memory.approvals[approvalID] = item
+	memory.mu.Unlock()
+
+	retry, failed = store.RetryDeliveries(time.Now().UTC(), 30*time.Second, 2)
+	if len(retry) != 0 || len(failed) != 1 || failed[0].Status != "delivery_failed" || failed[0].DeliveryStatus != "failed" {
+		t.Fatalf("retry=%+v failed=%+v, want exhausted failed delivery", retry, failed)
+	}
+
+	detail := getJSON(t, server.URL+"/api/v1/sessions/"+sessionID, http.StatusOK)
+	sessionData := detail["data"].(map[string]any)
+	if sessionData["status"] != "running" || sessionData["pending_approval_count"] != float64(0) {
+		t.Fatalf("session after exhausted delivery = %v, want running with no pending approvals", sessionData)
+	}
+
+	audit := getJSON(t, server.URL+"/api/v1/tenants/"+testTenantID+"/audit-logs?action=delivery.retry_exhausted", http.StatusOK)
+	if items := dataItems(t, audit); len(items) != 1 || items[0]["resource_id"] != approvalID {
+		t.Fatalf("audit logs = %v, want retry exhausted audit", items)
+	}
+}
+
 func TestAuditLogsCaptureDecisionAndAck(t *testing.T) {
 	resetTestStore()
 	server := httptest.NewServer(newRouter())
