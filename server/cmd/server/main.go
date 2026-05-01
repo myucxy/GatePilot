@@ -219,6 +219,12 @@ type registerClientInstanceRequest struct {
 	Platform    string `json:"platform"`
 }
 
+type updateClientInstanceRequest struct {
+	DisplayName string `json:"display_name"`
+	AppVersion  string `json:"app_version"`
+	Platform    string `json:"platform"`
+}
+
 type createDeviceGrantRequest struct {
 	UserID     string `json:"user_id"`
 	Permission string `json:"permission"`
@@ -250,6 +256,8 @@ type storeHealthChecker interface {
 
 type gatePilotStore interface {
 	RegisterClientInstance(req registerClientInstanceRequest, userID string, idempotencyKey string, now time.Time) (clientInstance, *appError)
+	UpdateClientInstance(clientInstanceID string, req updateClientInstanceRequest, now time.Time) (clientInstance, *appError)
+	LogoutClientInstance(clientInstanceID string, now time.Time) (clientInstance, *appError)
 	CreateActivationCode(tenantID string, req createActivationCodeRequest, idempotencyKey string, now time.Time) (string, time.Time, *appError)
 	ListDevices(tenantID string) []device
 	GetDevice(deviceID string) (device, *appError)
@@ -395,6 +403,41 @@ func (s *memoryStore) RegisterClientInstance(req registerClientInstanceRequest, 
 	}
 	s.clientInstances[item.ClientInstanceID] = item
 	s.clientInstanceReplay[replayKey] = clientInstanceReplay{Signature: signature, Item: item}
+	return item, nil
+}
+
+func (s *memoryStore) UpdateClientInstance(clientInstanceID string, req updateClientInstanceRequest, now time.Time) (clientInstance, *appError) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	item, ok := s.clientInstances[clientInstanceID]
+	if !ok {
+		return clientInstance{}, &appError{HTTPStatus: http.StatusNotFound, Code: "client_instance_not_found", Message: "client instance not found"}
+	}
+	if req.DisplayName != "" {
+		item.DisplayName = req.DisplayName
+	}
+	if req.AppVersion != "" {
+		item.AppVersion = req.AppVersion
+	}
+	if req.Platform != "" {
+		item.Platform = req.Platform
+	}
+	item.Status = "active"
+	item.LastSeenAt = now.Format(time.RFC3339)
+	s.clientInstances[clientInstanceID] = item
+	return item, nil
+}
+
+func (s *memoryStore) LogoutClientInstance(clientInstanceID string, now time.Time) (clientInstance, *appError) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	item, ok := s.clientInstances[clientInstanceID]
+	if !ok {
+		return clientInstance{}, &appError{HTTPStatus: http.StatusNotFound, Code: "client_instance_not_found", Message: "client instance not found"}
+	}
+	item.Status = "offline"
+	item.LastSeenAt = now.Format(time.RFC3339)
+	s.clientInstances[clientInstanceID] = item
 	return item, nil
 }
 
@@ -1321,18 +1364,62 @@ func runExpiryWorkerOnce() {
 
 func clientInstanceScopedHandler(w http.ResponseWriter, r *http.Request) {
 	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/v1/client-instances/"), "/")
-	if len(parts) < 2 {
+	if len(parts) == 0 || parts[0] == "" {
 		http.NotFound(w, r)
 		return
 	}
 	clientInstanceID := parts[0]
+	if len(parts) == 1 {
+		if r.Method == http.MethodPatch {
+			updateClientInstanceHandler(w, r, clientInstanceID)
+			return
+		}
+		http.NotFound(w, r)
+		return
+	}
 	resource := parts[1]
 	switch {
 	case resource == "push-token" && r.Method == http.MethodPost:
 		registerPushTokenHandler(w, r, clientInstanceID)
+	case resource == "logout" && r.Method == http.MethodPost:
+		logoutClientInstanceHandler(w, r, clientInstanceID)
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+func updateClientInstanceHandler(w http.ResponseWriter, r *http.Request, clientInstanceID string) {
+	var req updateClientInstanceRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, r, http.StatusBadRequest, "message_schema_invalid", err.Error())
+		return
+	}
+	item, appErr := store.UpdateClientInstance(clientInstanceID, req, time.Now().UTC())
+	if appErr != nil {
+		writeAppError(w, r, appErr)
+		return
+	}
+	writeJSON(w, envelope{
+		Data:      item,
+		RequestID: requestID(r),
+		TraceID:   traceID(r),
+	})
+}
+
+func logoutClientInstanceHandler(w http.ResponseWriter, r *http.Request, clientInstanceID string) {
+	item, appErr := store.LogoutClientInstance(clientInstanceID, time.Now().UTC())
+	if appErr != nil {
+		writeAppError(w, r, appErr)
+		return
+	}
+	writeJSON(w, envelope{
+		Data: map[string]string{
+			"client_instance_id": item.ClientInstanceID,
+			"status":             item.Status,
+		},
+		RequestID: requestID(r),
+		TraceID:   traceID(r),
+	})
 }
 
 func registerPushTokenHandler(w http.ResponseWriter, r *http.Request, clientInstanceID string) {

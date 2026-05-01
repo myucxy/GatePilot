@@ -112,6 +112,71 @@ paths:
                             type: string
         "404":
           $ref: "#/components/responses/ErrorResponse"
+  /client-instances/{client_instance_id}:
+    patch:
+      operationId: updateClientInstance
+      summary: Update a client instance heartbeat metadata
+      parameters:
+        - name: client_instance_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateClientInstanceRequest"
+      responses:
+        "200":
+          description: Client instance updated
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/ClientInstance"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+  /client-instances/{client_instance_id}/logout:
+    post:
+      operationId: logoutClientInstance
+      summary: Mark a client instance offline
+      parameters:
+        - name: client_instance_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Client instance logged out
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required:
+                          - client_instance_id
+                          - status
+                        properties:
+                          client_instance_id:
+                            type: string
+                            format: uuid
+                          status:
+                            type: string
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
   /tenants/{tenant_id}/device-activation-codes:
     post:
       operationId: createDeviceActivationCode
@@ -866,6 +931,62 @@ components:
             - ios
             - android
             - browser
+    UpdateClientInstanceRequest:
+      type: object
+      properties:
+        display_name:
+          type: string
+        app_version:
+          type: string
+        platform:
+          type: string
+    ClientInstance:
+      type: object
+      required:
+        - client_instance_id
+        - tenant_id
+        - user_id
+        - client_type
+        - display_name
+        - app_version
+        - platform
+        - status
+        - last_seen_at
+        - created_at
+      properties:
+        client_instance_id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+          format: uuid
+        client_type:
+          type: string
+        device_id:
+          type: string
+          format: uuid
+        display_name:
+          type: string
+        app_version:
+          type: string
+        platform:
+          type: string
+        push_provider:
+          type: string
+        status:
+          type: string
+          enum:
+            - active
+            - offline
+        last_seen_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
     RegisterPushTokenRequest:
       type: object
       required:

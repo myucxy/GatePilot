@@ -128,17 +128,58 @@ SET push_provider = $1,
 WHERE id = $4
 RETURNING id::text, tenant_id::text, user_id::text, client_type, COALESCE(device_id::text, ''), display_name, app_version, platform, push_provider, status, last_seen_at, created_at`,
 		req.Provider, sha256Hex(req.Token), now, clientInstanceID)
-	var item clientInstance
-	var lastSeenAt, createdAt time.Time
-	err := row.Scan(&item.ClientInstanceID, &item.TenantID, &item.UserID, &item.ClientType, &item.DeviceID, &item.DisplayName, &item.AppVersion, &item.Platform, &item.PushProvider, &item.Status, &lastSeenAt, &createdAt)
+	item, err := scanClientInstance(row)
 	if err == sql.ErrNoRows {
 		return clientInstance{}, &appError{HTTPStatus: http.StatusNotFound, Code: "client_instance_not_found", Message: "client instance not found"}
 	}
 	if err != nil {
 		return clientInstance{}, internalStoreError(err)
 	}
-	item.LastSeenAt = lastSeenAt.Format(time.RFC3339)
-	item.CreatedAt = createdAt.Format(time.RFC3339)
+	return item, nil
+}
+
+func (s *postgresStore) UpdateClientInstance(clientInstanceID string, req updateClientInstanceRequest, now time.Time) (clientInstance, *appError) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	row := s.db.QueryRowContext(ctx, `
+UPDATE client_instances
+SET display_name = CASE WHEN $1 <> '' THEN $1 ELSE display_name END,
+    app_version = CASE WHEN $2 <> '' THEN $2 ELSE app_version END,
+    platform = CASE WHEN $3 <> '' THEN $3 ELSE platform END,
+    status = 'active',
+    last_seen_at = $4,
+    updated_at = $4
+WHERE id = $5
+RETURNING id::text, tenant_id::text, user_id::text, client_type, COALESCE(device_id::text, ''), display_name, app_version, platform, push_provider, status, last_seen_at, created_at`,
+		req.DisplayName, req.AppVersion, req.Platform, now, clientInstanceID)
+	item, err := scanClientInstance(row)
+	if err == sql.ErrNoRows {
+		return clientInstance{}, &appError{HTTPStatus: http.StatusNotFound, Code: "client_instance_not_found", Message: "client instance not found"}
+	}
+	if err != nil {
+		return clientInstance{}, internalStoreError(err)
+	}
+	return item, nil
+}
+
+func (s *postgresStore) LogoutClientInstance(clientInstanceID string, now time.Time) (clientInstance, *appError) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	row := s.db.QueryRowContext(ctx, `
+UPDATE client_instances
+SET status = 'offline',
+    last_seen_at = $1,
+    updated_at = $1
+WHERE id = $2
+RETURNING id::text, tenant_id::text, user_id::text, client_type, COALESCE(device_id::text, ''), display_name, app_version, platform, push_provider, status, last_seen_at, created_at`,
+		now, clientInstanceID)
+	item, err := scanClientInstance(row)
+	if err == sql.ErrNoRows {
+		return clientInstance{}, &appError{HTTPStatus: http.StatusNotFound, Code: "client_instance_not_found", Message: "client instance not found"}
+	}
+	if err != nil {
+		return clientInstance{}, internalStoreError(err)
+	}
 	return item, nil
 }
 
@@ -1530,6 +1571,22 @@ type sessionScanner interface {
 
 type deviceScanner interface {
 	Scan(dest ...any) error
+}
+
+type clientInstanceScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanClientInstance(scanner clientInstanceScanner) (clientInstance, error) {
+	var item clientInstance
+	var lastSeenAt, createdAt time.Time
+	err := scanner.Scan(&item.ClientInstanceID, &item.TenantID, &item.UserID, &item.ClientType, &item.DeviceID, &item.DisplayName, &item.AppVersion, &item.Platform, &item.PushProvider, &item.Status, &lastSeenAt, &createdAt)
+	if err != nil {
+		return clientInstance{}, err
+	}
+	item.LastSeenAt = lastSeenAt.Format(time.RFC3339)
+	item.CreatedAt = createdAt.Format(time.RFC3339)
+	return item, nil
 }
 
 func scanDevice(scanner deviceScanner) (device, error) {

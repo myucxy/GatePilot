@@ -23,6 +23,8 @@ Endpoints:
 - `GET /metrics`
 - `GET /api/v1/me`
 - `POST /api/v1/client-instances`
+- `PATCH /api/v1/client-instances/{client_instance_id}`
+- `POST /api/v1/client-instances/{client_instance_id}/logout`
 - `POST /api/v1/tenants/{tenant_id}/device-activation-codes`
 - `GET /api/v1/tenants/{tenant_id}/devices`
 - `GET /api/v1/devices/{device_id}`

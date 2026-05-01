@@ -487,6 +487,30 @@ func TestClientInstancePushTokenRegistration(t *testing.T) {
 	}
 }
 
+func TestClientInstanceUpdateAndLogout(t *testing.T) {
+	resetTestStore()
+	server := httptest.NewServer(newRouter())
+	defer server.Close()
+
+	clientInstanceID := registerTestClientInstance(t, server.URL)
+	updated := patchJSON(t, server.URL+"/api/v1/client-instances/"+clientInstanceID, map[string]any{
+		"display_name": "Updated Browser",
+		"app_version":  "0.2.0",
+		"platform":     "browser",
+	}, http.StatusOK)
+	if got := dataString(t, updated, "display_name"); got != "Updated Browser" {
+		t.Fatalf("display_name = %q, want updated", got)
+	}
+	if got := dataString(t, updated, "status"); got != "active" {
+		t.Fatalf("updated status = %q, want active", got)
+	}
+
+	logout := postJSON(t, server.URL+"/api/v1/client-instances/"+clientInstanceID+"/logout", map[string]any{}, http.StatusOK)
+	if got := dataString(t, logout, "status"); got != "offline" {
+		t.Fatalf("logout status = %q, want offline", got)
+	}
+}
+
 func TestExpiryWorkerRejectsExpiredApprovalsForDelivery(t *testing.T) {
 	resetTestStore()
 	server := httptest.NewServer(newRouter())
@@ -1246,6 +1270,25 @@ func postJSONWithHeaders(t *testing.T, url string, payload map[string]any, heade
 		}
 	}
 
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	return decodeJSONResponse(t, resp, wantStatus)
+}
+
+func patchJSON(t *testing.T, url string, payload map[string]any, wantStatus int) map[string]any {
+	t.Helper()
+	body, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := http.NewRequest(http.MethodPatch, url, bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
