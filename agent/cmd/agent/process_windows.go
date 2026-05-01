@@ -275,7 +275,10 @@ func enableRawConsoleMode() func() {
 		_ = windows.SetConsoleMode(input, mode)
 	}
 	if outputErr == nil && windows.GetConsoleMode(output, &oldOutput) == nil {
-		_ = windows.SetConsoleMode(output, oldOutput|windows.ENABLE_VIRTUAL_TERMINAL_PROCESSING)
+		outputMode := oldOutput | windows.ENABLE_VIRTUAL_TERMINAL_PROCESSING | windows.DISABLE_NEWLINE_AUTO_RETURN
+		if err := windows.SetConsoleMode(output, outputMode); err != nil {
+			_ = windows.SetConsoleMode(output, oldOutput|windows.ENABLE_VIRTUAL_TERMINAL_PROCESSING)
+		}
 	}
 	return func() {
 		if inputErr == nil && oldInput != 0 {
