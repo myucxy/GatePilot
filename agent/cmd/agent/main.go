@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
@@ -9,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -30,6 +32,8 @@ type agentConfig struct {
 	ServerURL   string `json:"server_url"`
 	ServerWSURL string `json:"server_ws_url"`
 }
+
+var deliveryDecisionWriter io.Writer = io.Discard
 
 func main() {
 	command := "version"
@@ -91,20 +95,28 @@ func runManagedCLI(args []string) {
 	cliType = adapter.NormalizeCLIType(cliType)
 	cliAdapter := adapter.ForCLI(cliType)
 
-	fmt.Println("GatePilot fake AI CLI")
-	fmt.Println("permission_request: allow command execution? [approve/reject/reply]")
-	detected := cliAdapter.Detect(adapter.TerminalSnapshot{
-		SessionID:   "",
-		SequenceNo:  1,
-		VisibleText: "GatePilot fake AI CLI\npermission_request: allow command execution? [approve/reject/reply]",
-		CursorLine:  "permission_request: allow command execution? [approve/reject/reply]",
-		RecentLines: []string{"GatePilot fake AI CLI", "permission_request: allow command execution? [approve/reject/reply]"},
-	})
-	if len(detected) == 0 {
-		fmt.Fprintln(os.Stderr, "managed CLI prompt was not detected")
+	cmd := exec.Command(os.Args[0], "run-fake")
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	event := detected[0]
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	event, outputText, err := detectApprovalFromReader(stdout, cliAdapter)
+	if err != nil {
+		_ = cmd.Process.Kill()
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 
 	sessionBody := mustMarshal(map[string]any{
 		"device_id":             config.DeviceID,
@@ -119,7 +131,6 @@ func runManagedCLI(args []string) {
 		os.Exit(1)
 	}
 	sessionID := responseDataString(sessionResp, "session_id")
-	outputText := "GatePilot fake AI CLI\npermission_request: allow command execution? [approve/reject/reply]"
 	if err := appendOutputChunk(config.ServerURL, config.DeviceID, config.DeviceToken, sessionID, 1, "stdout", outputText); err != nil {
 		fmt.Fprintf(os.Stderr, "append managed output failed: %v\n", err)
 		os.Exit(1)
@@ -153,17 +164,59 @@ func runManagedCLI(args []string) {
 		return
 	}
 
+	deliveryDecisionWriter = stdin
+	defer func() {
+		deliveryDecisionWriter = io.Discard
+	}()
 	fmt.Println(mustJSON(map[string]any{
 		"session_id":  sessionID,
 		"approval_id": responseDataString(approvalResp, "approval_id"),
 		"status":      "waiting_decision",
 	}))
 	connectAgent([]string{"--device-id", config.DeviceID, "--wait-delivery"})
+	_ = stdin.Close()
+	if err := cmd.Wait(); err != nil {
+		fmt.Fprintf(os.Stderr, "managed CLI exited after decision: %v\n", err)
+		os.Exit(1)
+	}
 	exitCode := 0
 	if err := updateSessionStatus(config.ServerURL, config.DeviceID, config.DeviceToken, sessionID, "completed", &exitCode, "fake CLI completed"); err != nil {
 		fmt.Fprintf(os.Stderr, "update managed session failed: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+func detectApprovalFromReader(reader io.Reader, cliAdapter adapter.CLIAdapter) (adapter.DetectedEvent, string, error) {
+	scanner := bufio.NewScanner(reader)
+	recentLines := []string{}
+	var visible strings.Builder
+	sequence := int64(0)
+	for scanner.Scan() {
+		line := scanner.Text()
+		fmt.Println(line)
+		if visible.Len() > 0 {
+			visible.WriteString("\n")
+		}
+		visible.WriteString(line)
+		recentLines = append(recentLines, line)
+		if len(recentLines) > 8 {
+			recentLines = recentLines[len(recentLines)-8:]
+		}
+		sequence++
+		events := cliAdapter.Detect(adapter.TerminalSnapshot{
+			SequenceNo:  sequence,
+			VisibleText: visible.String(),
+			CursorLine:  line,
+			RecentLines: recentLines,
+		})
+		if len(events) > 0 {
+			return events[0], visible.String(), nil
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return adapter.DetectedEvent{}, visible.String(), err
+	}
+	return adapter.DetectedEvent{}, visible.String(), fmt.Errorf("managed CLI prompt was not detected")
 }
 
 func flushQueue(args []string) {
@@ -333,15 +386,24 @@ func waitForDelivery(conn *websocket.Conn, traceID string) {
 			os.Exit(1)
 		}
 
+		bytesWritten := len(decisionInput)
+		ackResult := "written"
+		if deliveryDecisionWriter != nil {
+			n, err := deliveryDecisionWriter.Write(decisionInput)
+			bytesWritten = n
+			if err != nil {
+				ackResult = "write_failed"
+			}
+		}
 		ackPayload := map[string]any{
 			"delivery_id": delivery.DeliveryID,
 			"approval_id": delivery.ApprovalID,
 			"session_id":  delivery.SessionID,
-			"ack_result":  "written",
+			"ack_result":  ackResult,
 			"detail": map[string]any{
 				"source":        "agent-websocket",
 				"decision_type": delivery.DecisionType,
-				"bytes_written": len(decisionInput),
+				"bytes_written": bytesWritten,
 			},
 		}
 		if err := conn.WriteJSON(newWSEnvelope("approval.decision.ack", traceID, ackPayload)); err != nil {
@@ -352,7 +414,7 @@ func waitForDelivery(conn *websocket.Conn, traceID string) {
 			"delivery_id": delivery.DeliveryID,
 			"approval_id": delivery.ApprovalID,
 			"session_id":  delivery.SessionID,
-			"ack_result":  "written",
+			"ack_result":  ackResult,
 		}))
 		return
 	}
@@ -479,6 +541,35 @@ func runFakeCLI() {
 	fmt.Println("GatePilot fake AI CLI")
 	fmt.Println("permission_request: allow command execution? [approve/reject/reply]")
 	fmt.Println("waiting_for_input")
+	decision, err := readDecisionLine(os.Stdin)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if decision == "" {
+		fmt.Fprintln(os.Stderr, "empty fake CLI decision")
+		os.Exit(1)
+	}
+	fmt.Printf("received_decision: %s\n", decision)
+}
+
+func readDecisionLine(reader io.Reader) (string, error) {
+	buffered := bufio.NewReader(reader)
+	var input strings.Builder
+	for {
+		b, err := buffered.ReadByte()
+		if err != nil {
+			if input.Len() > 0 {
+				break
+			}
+			return "", err
+		}
+		if b == '\r' || b == '\n' {
+			break
+		}
+		input.WriteByte(b)
+	}
+	return strings.TrimSpace(input.String()), nil
 }
 
 func detectApproval(args []string) {

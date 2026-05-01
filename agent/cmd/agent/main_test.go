@@ -5,8 +5,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/myucxy/gatepilot/agent/internal/adapter"
 	"github.com/myucxy/gatepilot/agent/internal/localqueue"
 )
 
@@ -121,6 +123,29 @@ func TestApprovalEventPayloadDefaultsExpiry(t *testing.T) {
 	}
 	if got := payload["idempotency_key"]; got != "idem-1" {
 		t.Fatalf("idempotency_key = %v, want idem-1", got)
+	}
+}
+
+func TestDetectApprovalFromReaderFindsFakePrompt(t *testing.T) {
+	event, output, err := detectApprovalFromReader(strings.NewReader("GatePilot fake AI CLI\npermission_request: allow command execution? [approve/reject/reply]\nwaiting_for_input\n"), adapter.ForCLI("custom"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event.EventType != "permission_request" || event.RiskLevel != "high" {
+		t.Fatalf("event = %+v, want high permission request", event)
+	}
+	if !strings.Contains(output, "permission_request") {
+		t.Fatalf("output = %q, want prompt text", output)
+	}
+}
+
+func TestReadDecisionLineAcceptsCarriageReturn(t *testing.T) {
+	got, err := readDecisionLine(strings.NewReader("approve\r"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "approve" {
+		t.Fatalf("decision = %q, want approve", got)
 	}
 }
 
