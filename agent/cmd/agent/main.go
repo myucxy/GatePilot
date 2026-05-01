@@ -927,7 +927,7 @@ func runAgentTray(args []string) {
 	if openSettings {
 		go func() {
 			time.Sleep(300 * time.Millisecond)
-			if err := openBrowser("http://" + trayListenAddress() + "/ui/settings"); err != nil {
+			if err := openDesktopClient("settings"); err != nil {
 				fmt.Fprintf(os.Stderr, "open settings failed: %v\n", err)
 			}
 		}()
@@ -1302,21 +1302,21 @@ func setupTrayMenu(state *trayState) {
 	systray.SetIcon(gatePilotTrayIcon())
 	systray.SetTitle("GatePilot")
 	systray.SetTooltip("GatePilot Agent")
-	statusItem := systray.AddMenuItem("离线本地模式", "Current GatePilot Agent mode")
+	statusItem := systray.AddMenuItem("离线本地模式", "当前 GatePilot Agent 模式")
 	statusItem.Disable()
 	systray.AddSeparator()
-	approveItem := systray.AddMenuItem("通过当前审批", "Approve current pending approval")
-	rejectItem := systray.AddMenuItem("拒绝当前审批", "Reject current pending approval")
+	approveItem := systray.AddMenuItem("通过当前审批", "通过当前待处理审批")
+	rejectItem := systray.AddMenuItem("拒绝当前审批", "拒绝当前待处理审批")
 	systray.AddSeparator()
-	toggleNotify := systray.AddMenuItem("关闭提醒", "Toggle local approval notifications")
-	toggleOffline := systray.AddMenuItem("切换离线/在线模式", "Toggle offline mode when login settings are present")
-	toggleStartup := systray.AddMenuItem("开启开机启动", "Toggle Windows start on login")
-	openSettingsItem := systray.AddMenuItem("打开设置", "Open local settings")
-	openHistoryItem := systray.AddMenuItem("打开会话历史", "Open local session history")
-	historyItem := systray.AddMenuItem("显示历史路径", "Print local history path")
-	settingsItem := systray.AddMenuItem("显示设置路径", "Print settings path")
-	loginItem := systray.AddMenuItem("登录/切换账号", "Print login command help")
-	quitItem := systray.AddMenuItem("退出", "Quit GatePilot Agent")
+	toggleNotify := systray.AddMenuItem("关闭提醒", "切换本地审批提醒")
+	toggleOffline := systray.AddMenuItem("切换离线/在线模式", "在已配置登录时切换离线或在线模式")
+	toggleStartup := systray.AddMenuItem("开启开机启动", "切换 Windows 开机启动")
+	openSettingsItem := systray.AddMenuItem("打开设置", "打开桌面客户端设置")
+	openHistoryItem := systray.AddMenuItem("打开会话历史", "打开桌面客户端会话历史")
+	historyItem := systray.AddMenuItem("显示历史路径", "输出本地历史文件路径")
+	settingsItem := systray.AddMenuItem("显示设置路径", "输出设置文件路径")
+	loginItem := systray.AddMenuItem("登录/切换账号", "打开桌面客户端登录设置")
+	quitItem := systray.AddMenuItem("退出", "退出 GatePilot Agent")
 
 	refresh := func() {
 		settings := state.currentSettings()
@@ -1389,14 +1389,14 @@ func setupTrayMenu(state *trayState) {
 	}()
 	go func() {
 		for range openSettingsItem.ClickedCh {
-			if err := openBrowser("http://" + trayListenAddress() + "/ui/settings"); err != nil {
+			if err := openDesktopClient("settings"); err != nil {
 				fmt.Fprintf(os.Stderr, "open settings failed: %v\n", err)
 			}
 		}
 	}()
 	go func() {
 		for range openHistoryItem.ClickedCh {
-			if err := openBrowser("http://" + trayListenAddress() + "/ui/history"); err != nil {
+			if err := openDesktopClient("history"); err != nil {
 				fmt.Fprintf(os.Stderr, "open history failed: %v\n", err)
 			}
 		}
@@ -1417,7 +1417,9 @@ func setupTrayMenu(state *trayState) {
 	}()
 	go func() {
 		for range loginItem.ClickedCh {
-			fmt.Println("gatepilot-agent.exe login --server-url <url> --tenant-id <tenant_id> --device-id <device_id>")
+			if err := openDesktopClient("settings"); err != nil {
+				fmt.Fprintf(os.Stderr, "open login settings failed: %v\n", err)
+			}
 		}
 	}()
 	go func() {
@@ -1833,37 +1835,72 @@ func replyLocalSession(args []string) {
 }
 
 func openLocalHistoryUI() {
-	target := "http://" + trayListenAddress() + "/ui/history"
-	if err := openBrowser(target); err != nil {
+	if err := openDesktopClient("history"); err != nil {
 		fmt.Fprintf(os.Stderr, "open history failed: %v\n", err)
 		os.Exit(1)
 	}
 	fmt.Println(mustJSON(map[string]any{
-		"type": "agent.history_opened",
-		"url":  target,
+		"type":   "agent.history_opened",
+		"target": "desktop",
 	}))
 }
 
 func openLocalSettingsUI() {
-	target := "http://" + trayListenAddress() + "/ui/settings"
-	if err := openBrowser(target); err != nil {
+	if err := openDesktopClient("settings"); err != nil {
 		fmt.Fprintf(os.Stderr, "open settings failed: %v\n", err)
 		os.Exit(1)
 	}
 	fmt.Println(mustJSON(map[string]any{
-		"type": "agent.settings_opened",
-		"url":  target,
+		"type":   "agent.settings_opened",
+		"target": "desktop",
 	}))
 }
 
-func openBrowser(target string) error {
-	if runtime.GOOS == "windows" {
-		return exec.Command("rundll32.exe", "url.dll,FileProtocolHandler", target).Start()
+func openDesktopClient(view string) error {
+	path, err := desktopClientPath()
+	if err != nil {
+		return err
 	}
-	if runtime.GOOS == "darwin" {
-		return exec.Command("open", target).Start()
+	args := []string{}
+	switch strings.ToLower(strings.TrimSpace(view)) {
+	case "history":
+		args = append(args, "--history")
+	case "settings":
+		args = append(args, "--settings")
 	}
-	return exec.Command("xdg-open", target).Start()
+	cmd := exec.Command(path, args...)
+	return cmd.Start()
+}
+
+func desktopClientPath() (string, error) {
+	if path := os.Getenv("GATEPILOT_AGENT_DESKTOP_EXE"); path != "" {
+		if _, err := os.Stat(path); err == nil {
+			return path, nil
+		}
+		return "", fmt.Errorf("GATEPILOT_AGENT_DESKTOP_EXE points to missing file: %s", path)
+	}
+	self, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	selfDir := filepath.Dir(self)
+	wd, _ := os.Getwd()
+	candidates := []string{
+		filepath.Join(selfDir, "gatepilot-agent-desktop.exe"),
+		filepath.Join(selfDir, "gatepilot-agent-desktop"),
+		filepath.Join(selfDir, "..", "gatepilot-agent-windows-amd64", "gatepilot-agent-desktop.exe"),
+		filepath.Join(wd, "dist", "gatepilot-agent-windows-amd64", "gatepilot-agent-desktop.exe"),
+		filepath.Join(wd, "agent", "desktop", "build", "bin", "gatepilot-agent-desktop.exe"),
+	}
+	for _, candidate := range candidates {
+		if candidate == "" {
+			continue
+		}
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate, nil
+		}
+	}
+	return "", fmt.Errorf("gatepilot-agent-desktop executable not found; build or install the desktop client first")
 }
 
 type localSessionHost struct {

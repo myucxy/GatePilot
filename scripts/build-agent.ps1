@@ -66,15 +66,15 @@ Copy-Item -LiteralPath (Join-Path $repoRoot "agent\desktop\build\bin\gatepilot-a
 $readme = @'
 # GatePilot Agent Windows AMD64
 
-Desktop UI:
+桌面客户端：
 
 ```powershell
 .\gatepilot-agent-desktop.exe
 ```
 
-The desktop UI starts or connects to `gatepilot-agent.exe tray` automatically.
+桌面客户端会自动启动或连接 `gatepilot-agent.exe tray`。日常配置、登录、离线模式、提醒开关、AI 工具历史来源和会话历史都在桌面客户端里完成，不需要打开网页。
 
-Offline local confirmation:
+离线本地确认：
 
 ```powershell
 .\gatepilot-agent.exe
@@ -95,9 +95,9 @@ Offline local confirmation:
 .\gatepilot-agent.exe logout
 ```
 
-Double-clicking `gatepilot-agent.exe` starts the tray agent and opens the settings UI.
+双击 `gatepilot-agent.exe` 会启动托盘 Agent，并打开桌面客户端设置页。托盘菜单里的设置、登录和会话历史也都会打开 `gatepilot-agent-desktop.exe`，不会再弹出浏览器网页。
 
-Server-backed local UI:
+服务端联动模式：
 
 ```powershell
 .\gatepilot-agent.exe register --activation-code <code>

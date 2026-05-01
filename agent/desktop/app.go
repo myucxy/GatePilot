@@ -156,6 +156,18 @@ func (a *App) EnsureAgent() error {
 	return fmt.Errorf("agent tray did not become ready")
 }
 
+func (a *App) InitialView() string {
+	for _, arg := range os.Args[1:] {
+		switch strings.ToLower(strings.TrimSpace(arg)) {
+		case "--history", "history":
+			return "history"
+		case "--settings", "settings":
+			return "settings"
+		}
+	}
+	return "settings"
+}
+
 func (a *App) GetStatus() (AgentStatus, error) {
 	var response struct {
 		Data AgentStatus `json:"data"`

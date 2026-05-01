@@ -16,6 +16,8 @@ export function GetSessionDetail(arg1:string):Promise<main.SessionDetail>;
 
 export function GetStatus():Promise<main.AgentStatus>;
 
+export function InitialView():Promise<string>;
+
 export function ListAIToolSessions(arg1:string,arg2:string,arg3:number):Promise<main.AIToolSessionList>;
 
 export function ListSessions(arg1:string,arg2:string,arg3:number):Promise<main.SessionList>;

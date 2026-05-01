@@ -30,6 +30,10 @@ export function GetStatus() {
   return window['go']['main']['App']['GetStatus']();
 }
 
+export function InitialView() {
+  return window['go']['main']['App']['InitialView']();
+}
+
 export function ListAIToolSessions(arg1, arg2, arg3) {
   return window['go']['main']['App']['ListAIToolSessions'](arg1, arg2, arg3);
 }
