@@ -35,7 +35,9 @@ Endpoints:
 - `POST /api/v1/agent/sessions`
 - `POST /api/v1/agent/session-updates`
 - `GET /api/v1/devices/{device_id}/sessions`
+- `GET /api/v1/tenants/{tenant_id}/sessions`
 - `GET /api/v1/sessions/{session_id}`
+- `GET /api/v1/sessions/{session_id}/approvals`
 - `GET /api/v1/sessions/{session_id}/output-chunks`
 - `POST /api/v1/agent/approvals`
 - `POST /api/v1/agent/approval-acks`

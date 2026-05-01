@@ -273,7 +273,9 @@ type gatePilotStore interface {
 	AppendAuditLog(item auditLog, now time.Time)
 	ListAuditLogs(req auditLogListRequest) []auditLog
 	GetSession(sessionID string) (session, *appError)
+	ListTenantSessions(tenantID string) []session
 	ListDeviceSessions(deviceID string) []session
+	ListSessionApprovals(sessionID string) []approval
 	AppendOutputChunk(req createOutputChunkRequest, now time.Time) (outputChunk, *appError)
 	ListOutputChunks(sessionID string) []outputChunk
 	MarkDeviceSeen(deviceID string, now time.Time) *appError
@@ -995,7 +997,42 @@ func (s *memoryStore) ListDeviceSessions(deviceID string) []session {
 			items = append(items, item)
 		}
 	}
+	sortSessionsDesc(items)
 	return items
+}
+
+func (s *memoryStore) ListTenantSessions(tenantID string) []session {
+	items := []session{}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, item := range s.sessions {
+		if item.TenantID == tenantID {
+			items = append(items, item)
+		}
+	}
+	sortSessionsDesc(items)
+	return items
+}
+
+func (s *memoryStore) ListSessionApprovals(sessionID string) []approval {
+	items := []approval{}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, item := range s.approvals {
+		if item.SessionID == sessionID {
+			items = append(items, item)
+		}
+	}
+	sort.Slice(items, func(i, j int) bool {
+		return items[i].CreatedAt > items[j].CreatedAt
+	})
+	return items
+}
+
+func sortSessionsDesc(items []session) {
+	sort.Slice(items, func(i, j int) bool {
+		return items[i].StartedAt > items[j].StartedAt
+	})
 }
 
 func (s *memoryStore) AppendOutputChunk(req createOutputChunkRequest, now time.Time) (outputChunk, *appError) {
@@ -1214,10 +1251,28 @@ func sessionScopedHandler(w http.ResponseWriter, r *http.Request) {
 		})
 	case len(parts) == 2 && parts[1] == "output-chunks" && r.Method == http.MethodGet:
 		listOutputChunksHandler(w, r, sessionID)
+	case len(parts) == 2 && parts[1] == "approvals" && r.Method == http.MethodGet:
+		listSessionApprovalsHandler(w, r, sessionID)
 	default:
 		http.NotFound(w, r)
 		return
 	}
+}
+
+func listSessionApprovalsHandler(w http.ResponseWriter, r *http.Request, sessionID string) {
+	if _, appErr := store.GetSession(sessionID); appErr != nil {
+		writeAppError(w, r, appErr)
+		return
+	}
+	writeJSON(w, envelope{
+		Data: map[string]any{
+			"items":       store.ListSessionApprovals(sessionID),
+			"next_cursor": nil,
+			"has_more":    false,
+		},
+		RequestID: requestID(r),
+		TraceID:   traceID(r),
+	})
 }
 
 func startWorkersFromEnv() {
@@ -1562,6 +1617,8 @@ func tenantScopedHandler(w http.ResponseWriter, r *http.Request) {
 		createActivationCodeHandler(w, r, tenantID)
 	case resource == "devices" && r.Method == http.MethodGet:
 		listDevicesHandler(w, r, tenantID)
+	case resource == "sessions" && r.Method == http.MethodGet:
+		listTenantSessionsHandler(w, r, tenantID)
 	case resource == "approvals" && r.Method == http.MethodGet:
 		listApprovalsHandler(w, r, tenantID)
 	case resource == "audit-logs" && r.Method == http.MethodGet:
@@ -1597,6 +1654,18 @@ func listDevicesHandler(w http.ResponseWriter, r *http.Request, tenantID string)
 	writeJSON(w, envelope{
 		Data: map[string]any{
 			"items":       store.ListDevices(tenantID),
+			"next_cursor": nil,
+			"has_more":    false,
+		},
+		RequestID: requestID(r),
+		TraceID:   traceID(r),
+	})
+}
+
+func listTenantSessionsHandler(w http.ResponseWriter, r *http.Request, tenantID string) {
+	writeJSON(w, envelope{
+		Data: map[string]any{
+			"items":       store.ListTenantSessions(tenantID),
 			"next_cursor": nil,
 			"has_more":    false,
 		},

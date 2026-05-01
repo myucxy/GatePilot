@@ -1160,6 +1160,52 @@ ORDER BY started_at DESC`, deviceID)
 	return items
 }
 
+func (s *postgresStore) ListTenantSessions(tenantID string) []session {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	rows, err := s.db.QueryContext(ctx, `
+SELECT id::text, tenant_id::text, device_id::text, cli_type, status, started_at, ended_at, exit_code, last_output_summary, pending_approval_count
+FROM sessions
+WHERE tenant_id = $1
+ORDER BY started_at DESC`, tenantID)
+	if err != nil {
+		return []session{}
+	}
+	defer rows.Close()
+
+	items := []session{}
+	for rows.Next() {
+		item, err := scanSession(rows)
+		if err != nil {
+			return []session{}
+		}
+		items = append(items, item)
+	}
+	return items
+}
+
+func (s *postgresStore) ListSessionApprovals(sessionID string) []approval {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	rows, err := s.db.QueryContext(ctx, approvalByIDQuery()+`
+WHERE ar.session_id = $1
+ORDER BY ar.created_at DESC`, sessionID)
+	if err != nil {
+		return []approval{}
+	}
+	defer rows.Close()
+
+	items := []approval{}
+	for rows.Next() {
+		item, err := scanApproval(rows)
+		if err != nil {
+			return []approval{}
+		}
+		items = append(items, item)
+	}
+	return items
+}
+
 func (s *postgresStore) AppendOutputChunk(req createOutputChunkRequest, now time.Time) (outputChunk, *appError) {
 	if req.SessionID == "" || req.DeviceID == "" || req.SequenceNo <= 0 {
 		return outputChunk{}, &appError{HTTPStatus: http.StatusBadRequest, Code: "message_schema_invalid", Message: "device_id, session_id, and positive sequence_no are required"}

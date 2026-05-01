@@ -414,6 +414,24 @@ paths:
                         $ref: "#/components/schemas/SessionListResponse"
         "404":
           $ref: "#/components/responses/ErrorResponse"
+  /tenants/{tenant_id}/sessions:
+    get:
+      operationId: listTenantSessions
+      summary: List CLI sessions in a tenant
+      parameters:
+        - $ref: "#/components/parameters/TenantId"
+      responses:
+        "200":
+          description: Tenant sessions
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/SessionListResponse"
   /sessions/{session_id}:
     get:
       operationId: getSession
@@ -437,6 +455,31 @@ paths:
                     properties:
                       data:
                         $ref: "#/components/schemas/Session"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+  /sessions/{session_id}/approvals:
+    get:
+      operationId: listSessionApprovals
+      summary: List approvals associated with a session
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Session approvals
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/ApprovalListResponse"
         "404":
           $ref: "#/components/responses/ErrorResponse"
   /sessions/{session_id}/output-chunks:

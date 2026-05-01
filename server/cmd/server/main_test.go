@@ -64,6 +64,18 @@ func TestDeviceSessionApprovalFlow(t *testing.T) {
 	if got := dataString(t, sessionDetail, "session_id"); got != sessionID {
 		t.Fatalf("session detail id = %q, want %q", got, sessionID)
 	}
+
+	tenantSessions := getJSON(t, server.URL+"/api/v1/tenants/"+testTenantID+"/sessions", http.StatusOK)
+	tenantSessionItems := dataItems(t, tenantSessions)
+	if len(tenantSessionItems) != 1 || tenantSessionItems[0]["session_id"] != sessionID {
+		t.Fatalf("tenant sessions = %v, want session %s", tenantSessionItems, sessionID)
+	}
+
+	sessionApprovals := getJSON(t, server.URL+"/api/v1/sessions/"+sessionID+"/approvals", http.StatusOK)
+	approvalItems := dataItems(t, sessionApprovals)
+	if len(approvalItems) != 1 || approvalItems[0]["approval_id"] != approvalID {
+		t.Fatalf("session approvals = %v, want approval %s", approvalItems, approvalID)
+	}
 }
 
 func TestHealthEndpoints(t *testing.T) {
