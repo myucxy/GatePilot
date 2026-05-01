@@ -158,7 +158,7 @@ func runManagedCLI(args []string) {
 			SessionID:       localSessionID,
 			SequenceNo:      1,
 			StreamType:      "stdout",
-			ContentRedacted: outputText,
+			ContentRedacted: localHistoryOutputContent(outputText),
 			ContentHash:     "sha256:" + sha256String(outputText),
 			CreatedAt:       time.Now().UTC().Format(time.RFC3339),
 		})
@@ -219,7 +219,7 @@ func runManagedCLI(args []string) {
 				SessionID:       localSessionID,
 				SequenceNo:      2,
 				StreamType:      "stdout",
-				ContentRedacted: string(remainingOutput),
+				ContentRedacted: localHistoryOutputContent(string(remainingOutput)),
 				ContentHash:     "sha256:" + sha256String(string(remainingOutput)),
 				CreatedAt:       time.Now().UTC().Format(time.RFC3339),
 			})

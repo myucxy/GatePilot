@@ -2,6 +2,7 @@ package main
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -102,5 +103,61 @@ func TestQueryLocalSessionsFiltersAndLimits(t *testing.T) {
 	}
 	if len(items) != 1 || items[0].SessionID != "session-3" {
 		t.Fatalf("items = %+v, want latest completed codex session", items)
+	}
+}
+
+func TestLocalHistoryOutputContentRespectsCaptureMode(t *testing.T) {
+	t.Setenv("GATEPILOT_AGENT_SETTINGS", filepath.Join(t.TempDir(), "settings.json"))
+	if err := saveAgentLocalSettings(agentLocalSettings{
+		Mode:              "offline",
+		NotificationStyle: "mini_window",
+		CaptureOutputMode: "summary_only",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	summary := localHistoryOutputContent("TOKEN=secret-value\nsecond line")
+	if summary == "TOKEN=secret-value\nsecond line" || !strings.HasPrefix(summary, "summary_only:") {
+		t.Fatalf("summary = %q, want summary-only redaction", summary)
+	}
+
+	if err := saveAgentLocalSettings(agentLocalSettings{
+		Mode:              "offline",
+		NotificationStyle: "mini_window",
+		CaptureOutputMode: "redacted_recent",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	redacted := localHistoryOutputContent("ok\napi_key=secret")
+	if !strings.Contains(redacted, "[redacted sensitive line]") {
+		t.Fatalf("redacted = %q, want sensitive line redacted", redacted)
+	}
+}
+
+func TestLocalHistoryRetentionPrunesEndedSessions(t *testing.T) {
+	t.Setenv("GATEPILOT_AGENT_HISTORY", filepath.Join(t.TempDir(), "history.json"))
+	t.Setenv("GATEPILOT_AGENT_SETTINGS", filepath.Join(t.TempDir(), "settings.json"))
+	if err := saveAgentLocalSettings(agentLocalSettings{
+		Mode:                 "offline",
+		NotificationStyle:    "mini_window",
+		HistoryRetentionDays: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	oldEndedAt := time.Now().UTC().AddDate(0, 0, -3).Format(time.RFC3339)
+	recentStartedAt := time.Now().UTC().Format(time.RFC3339)
+	history := pruneLocalHistory(localHistory{
+		Sessions: []localSessionRecord{
+			{SessionID: "old", Status: "completed", StartedAt: oldEndedAt, EndedAt: oldEndedAt},
+			{SessionID: "recent", Status: "completed", StartedAt: recentStartedAt, EndedAt: recentStartedAt},
+			{SessionID: "running", Status: "running", StartedAt: oldEndedAt},
+		},
+		Output: []localOutputRecord{
+			{SessionID: "old"},
+			{SessionID: "recent"},
+			{SessionID: "running"},
+		},
+	})
+	if len(history.Sessions) != 2 || len(history.Output) != 2 {
+		t.Fatalf("history = %+v, want old ended session pruned", history)
 	}
 }
