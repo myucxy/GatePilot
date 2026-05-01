@@ -918,6 +918,7 @@ func runAgentTray(args []string) {
 		os.Exit(1)
 	}
 	defer server.Shutdown(context.Background())
+	startAIToolMonitor(state)
 	if readyFile != "" {
 		if err := os.WriteFile(readyFile, []byte("ready"), 0600); err != nil {
 			fmt.Fprintln(os.Stderr, err)
