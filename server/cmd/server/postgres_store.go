@@ -1072,28 +1072,34 @@ VALUES ($1, 'system', NULL, 'approval.timeout_reject', 'approval', $2, 'success'
 	return expired
 }
 
-func (s *postgresStore) MarkStaleDevicesOffline(now time.Time, offlineAfter time.Duration) []device {
+func (s *postgresStore) MarkStaleDevices(now time.Time, suspectAfter time.Duration, offlineAfter time.Duration) []device {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	rows, err := s.db.QueryContext(ctx, `
 UPDATE devices
-SET status = 'offline', updated_at = $1
-WHERE status = 'active' AND last_seen_at <= $2
+SET status = CASE
+        WHEN last_seen_at <= $2 THEN 'offline'
+        ELSE 'suspect_offline'
+    END,
+    updated_at = $1
+WHERE status IN ('active', 'suspect_offline')
+  AND last_seen_at <= $3
+  AND status <> CASE
+        WHEN last_seen_at <= $2 THEN 'offline'
+        ELSE 'suspect_offline'
+    END
 RETURNING id::text, tenant_id::text, name, platform, arch, status, last_seen_at, created_at`,
-		now, now.Add(-offlineAfter))
+		now, now.Add(-offlineAfter), now.Add(-suspectAfter))
 	if err != nil {
 		return []device{}
 	}
 	defer rows.Close()
 	items := []device{}
 	for rows.Next() {
-		var item device
-		var lastSeen, createdAt time.Time
-		if err := rows.Scan(&item.DeviceID, &item.TenantID, &item.Name, &item.Platform, &item.Arch, &item.Status, &lastSeen, &createdAt); err != nil {
+		item, err := scanDevice(rows)
+		if err != nil {
 			return []device{}
 		}
-		item.LastSeen = lastSeen.Format(time.RFC3339)
-		item.CreatedAt = createdAt.Format(time.RFC3339)
 		items = append(items, item)
 	}
 	return items

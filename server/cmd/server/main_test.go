@@ -960,7 +960,7 @@ func TestAgentWebSocketHelloAndHeartbeat(t *testing.T) {
 	}
 }
 
-func TestStaleDeviceWorkerMarksDeviceOffline(t *testing.T) {
+func TestStaleDeviceWorkerMarksDeviceSuspectThenOffline(t *testing.T) {
 	resetTestStore()
 	server := httptest.NewServer(newRouter())
 	defer server.Close()
@@ -974,16 +974,32 @@ func TestStaleDeviceWorkerMarksDeviceOffline(t *testing.T) {
 	}
 	memory.mu.Lock()
 	item := memory.devices[deviceID]
+	item.LastSeen = time.Now().UTC().Add(-1 * time.Minute).Format(time.RFC3339)
+	memory.devices[deviceID] = item
+	memory.mu.Unlock()
+
+	changed := store.MarkStaleDevices(time.Now().UTC(), 45*time.Second, 3*time.Minute)
+	if len(changed) != 1 || changed[0].DeviceID != deviceID || changed[0].Status != "suspect_offline" {
+		t.Fatalf("changed devices = %+v, want suspect device %s", changed, deviceID)
+	}
+	devices := getJSON(t, server.URL+"/api/v1/tenants/"+testTenantID+"/devices", http.StatusOK)
+	items := dataItems(t, devices)
+	if items[0]["status"] != "suspect_offline" {
+		t.Fatalf("device status = %v, want suspect_offline", items[0]["status"])
+	}
+
+	memory.mu.Lock()
+	item = memory.devices[deviceID]
 	item.LastSeen = time.Now().UTC().Add(-5 * time.Minute).Format(time.RFC3339)
 	memory.devices[deviceID] = item
 	memory.mu.Unlock()
 
-	changed := store.MarkStaleDevicesOffline(time.Now().UTC(), 3*time.Minute)
+	changed = store.MarkStaleDevices(time.Now().UTC(), 45*time.Second, 3*time.Minute)
 	if len(changed) != 1 || changed[0].DeviceID != deviceID || changed[0].Status != "offline" {
 		t.Fatalf("changed devices = %+v, want offline device %s", changed, deviceID)
 	}
-	devices := getJSON(t, server.URL+"/api/v1/tenants/"+testTenantID+"/devices", http.StatusOK)
-	items := dataItems(t, devices)
+	devices = getJSON(t, server.URL+"/api/v1/tenants/"+testTenantID+"/devices", http.StatusOK)
+	items = dataItems(t, devices)
 	if items[0]["status"] != "offline" {
 		t.Fatalf("device status = %v, want offline", items[0]["status"])
 	}

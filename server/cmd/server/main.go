@@ -277,7 +277,7 @@ type gatePilotStore interface {
 	CanApproveDevice(tenantID string, deviceID string, userID string) bool
 	RegisterPushToken(clientInstanceID string, req registerPushTokenRequest, now time.Time) (clientInstance, *appError)
 	ExpireApprovals(now time.Time) []approval
-	MarkStaleDevicesOffline(now time.Time, offlineAfter time.Duration) []device
+	MarkStaleDevices(now time.Time, suspectAfter time.Duration, offlineAfter time.Duration) []device
 	AppendAuditLog(item auditLog, now time.Time)
 	ListAuditLogs(req auditLogListRequest) []auditLog
 	GetSession(sessionID string) (session, *appError)
@@ -948,19 +948,30 @@ func (s *memoryStore) ExpireApprovals(now time.Time) []approval {
 	return expired
 }
 
-func (s *memoryStore) MarkStaleDevicesOffline(now time.Time, offlineAfter time.Duration) []device {
+func (s *memoryStore) MarkStaleDevices(now time.Time, suspectAfter time.Duration, offlineAfter time.Duration) []device {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	changed := []device{}
 	for _, item := range s.devices {
-		if item.Status != "active" {
+		if item.Status != "active" && item.Status != "suspect_offline" {
 			continue
 		}
 		lastSeen, err := time.Parse(time.RFC3339, item.LastSeen)
-		if err != nil || now.Sub(lastSeen) < offlineAfter {
+		if err != nil {
 			continue
 		}
-		item.Status = "offline"
+		age := now.Sub(lastSeen)
+		nextStatus := item.Status
+		switch {
+		case age >= offlineAfter:
+			nextStatus = "offline"
+		case item.Status == "active" && age >= suspectAfter:
+			nextStatus = "suspect_offline"
+		}
+		if nextStatus == item.Status {
+			continue
+		}
+		item.Status = nextStatus
 		s.devices[item.DeviceID] = item
 		changed = append(changed, item)
 	}
@@ -1346,13 +1357,22 @@ func runExpiryWorkerOnce() {
 			pushSessionUpdatedToClients(sessionItem)
 		}
 	}
+	suspectAfter := 45 * time.Second
+	if value := os.Getenv("GATEPILOT_DEVICE_SUSPECT_SECONDS"); value != "" {
+		if seconds, err := strconv.Atoi(value); err == nil && seconds > 0 {
+			suspectAfter = time.Duration(seconds) * time.Second
+		}
+	}
 	offlineAfter := 3 * time.Minute
 	if value := os.Getenv("GATEPILOT_DEVICE_OFFLINE_SECONDS"); value != "" {
 		if seconds, err := strconv.Atoi(value); err == nil && seconds > 0 {
 			offlineAfter = time.Duration(seconds) * time.Second
 		}
 	}
-	for _, item := range store.MarkStaleDevicesOffline(time.Now().UTC(), offlineAfter) {
+	if offlineAfter < suspectAfter {
+		offlineAfter = suspectAfter
+	}
+	for _, item := range store.MarkStaleDevices(time.Now().UTC(), suspectAfter, offlineAfter) {
 		clientHub.broadcast(item.TenantID, newWSEnvelope("device.status_changed", "tr_worker", map[string]any{
 			"tenant_id":    item.TenantID,
 			"device_id":    item.DeviceID,
