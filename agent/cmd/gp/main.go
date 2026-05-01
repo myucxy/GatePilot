@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/myucxy/gatepilot/agent/internal/adapter"
 )
 
@@ -91,7 +92,7 @@ func runManagedTerminal(options runOptions) {
 	}
 	detector.setWriter(command.Input)
 	localHost, _ := startLocalSessionHost(sessionID, command.Input)
-	_ = upsertLocalSession(localSessionRecord{
+	startedRecord := localSessionRecord{
 		SessionID:           sessionID,
 		CLIType:             options.CLIType,
 		CommandLineRedacted: options.CommandLine,
@@ -101,7 +102,12 @@ func runManagedTerminal(options runOptions) {
 		StartedAt:           time.Now().UTC().Format(time.RFC3339),
 		LastOutputSummary:   "本地 AI CLI 已启动",
 		ControlAddr:         localHostAddress(localHost),
-	})
+	}
+	_ = upsertLocalSession(startedRecord)
+	liveStream := connectRuntimeEventStream()
+	defer liveStream.Close()
+	detector.setLiveStream(liveStream)
+	liveStream.Send("session_started", startedRecord)
 
 	exitCode, err := command.Wait()
 	if localHost != nil {
@@ -116,14 +122,16 @@ func runManagedTerminal(options runOptions) {
 			exitCode = 1
 		}
 	}
-	_ = upsertLocalSession(localSessionRecord{
+	endedRecord := localSessionRecord{
 		SessionID:         sessionID,
 		Status:            exitStatus,
 		EndedAt:           time.Now().UTC().Format(time.RFC3339),
 		LastOutputSummary: summary,
 		PendingApprovals:  0,
 		ControlAddr:       "",
-	})
+	}
+	_ = upsertLocalSession(endedRecord)
+	liveStream.Send("session_updated", endedRecord)
 	if err != nil {
 		os.Exit(exitCode)
 	}
@@ -153,6 +161,7 @@ type interactiveApprovalDetector struct {
 	lineBuffer     strings.Builder
 	recentLines    []string
 	pending        bool
+	liveStream     *runtimeEventStream
 }
 
 func newInteractiveApprovalDetector(sessionID string, workingDir string, options runOptions, cliAdapter adapter.CLIAdapter) *interactiveApprovalDetector {
@@ -163,6 +172,12 @@ func (d *interactiveApprovalDetector) setWriter(writer io.Writer) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.writer = writer
+}
+
+func (d *interactiveApprovalDetector) setLiveStream(stream *runtimeEventStream) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.liveStream = stream
 }
 
 func (d *interactiveApprovalDetector) onOutput(chunk []byte) {
@@ -193,17 +208,37 @@ func (d *interactiveApprovalDetector) onOutput(chunk []byte) {
 	d.mu.Unlock()
 
 	if outputSequence <= 200 {
-		_ = appendLocalOutput(localOutputRecord{
+		record := localOutputRecord{
 			SessionID:       d.sessionID,
 			SequenceNo:      outputSequence,
 			StreamType:      "stdout",
 			ContentRedacted: localHistoryOutputContent(text),
 			ContentHash:     "sha256:" + sha256String(text),
 			CreatedAt:       time.Now().UTC().Format(time.RFC3339),
-		})
+		}
+		_ = appendLocalOutput(record)
+		d.sendLiveEvent("output", liveOutputRecord(record, text))
+	} else {
+		d.sendLiveEvent("output", liveOutputRecord(localOutputRecord{
+			SessionID:       d.sessionID,
+			SequenceNo:      outputSequence,
+			StreamType:      "stdout",
+			ContentRedacted: localHistoryOutputContent(text),
+			ContentHash:     "sha256:" + sha256String(text),
+			CreatedAt:       time.Now().UTC().Format(time.RFC3339),
+		}, text))
 	}
 	if shouldHandle {
 		go d.handleApproval(event)
+	}
+}
+
+func (d *interactiveApprovalDetector) sendLiveEvent(eventType string, payload any) {
+	d.mu.Lock()
+	stream := d.liveStream
+	d.mu.Unlock()
+	if stream != nil {
+		stream.Send(eventType, payload)
 	}
 }
 
@@ -260,7 +295,7 @@ func (d *interactiveApprovalDetector) handleApproval(event adapter.DetectedEvent
 		ContextBefore: event.ContextBefore,
 		ExpiresAt:     time.Now().UTC().Add(5 * time.Minute).Format(time.RFC3339),
 	}
-	_ = upsertLocalApproval(localApprovalRecord{
+	approvalRecord := localApprovalRecord{
 		ApprovalID:    approvalID,
 		SessionID:     d.sessionID,
 		CLIType:       d.cliAdapter.Type(),
@@ -270,7 +305,9 @@ func (d *interactiveApprovalDetector) handleApproval(event adapter.DetectedEvent
 		ContextBefore: event.ContextBefore,
 		Status:        "waiting_decision",
 		CreatedAt:     createdAt,
-	})
+	}
+	_ = upsertLocalApproval(approvalRecord)
+	d.sendLiveEvent("approval", approvalRecord)
 	_ = upsertLocalSession(localSessionRecord{
 		SessionID:         d.sessionID,
 		Status:            "waiting_approval",
@@ -318,7 +355,7 @@ func (d *interactiveApprovalDetector) handleApproval(event adapter.DetectedEvent
 		result = "write_failed"
 	}
 	decidedAt := time.Now().UTC().Format(time.RFC3339)
-	_ = appendLocalDecision(localDecisionRecord{
+	decisionRecord := localDecisionRecord{
 		ApprovalID:      approvalID,
 		SessionID:       d.sessionID,
 		DecisionType:    decisionType,
@@ -326,7 +363,9 @@ func (d *interactiveApprovalDetector) handleApproval(event adapter.DetectedEvent
 		BytesWritten:    n,
 		Result:          result,
 		CreatedAt:       decidedAt,
-	})
+	}
+	_ = appendLocalDecision(decisionRecord)
+	d.sendLiveEvent("decision", decisionRecord)
 	_ = upsertLocalApproval(localApprovalRecord{
 		ApprovalID: approvalID,
 		SessionID:  d.sessionID,
@@ -379,6 +418,37 @@ type trayDecisionResponse struct {
 }
 
 func requestTrayDecision(approval localApproval, workingDir string) (string, string, error) {
+	if decisionType, payload, err := requestTrayDecisionWebSocket(approval, workingDir); err == nil {
+		return decisionType, payload, nil
+	}
+	return requestTrayDecisionHTTP(approval, workingDir)
+}
+
+func requestTrayDecisionWebSocket(approval localApproval, workingDir string) (string, string, error) {
+	conn, _, err := websocket.DefaultDialer.Dial("ws://"+trayListenAddress()+"/api/local/approvals/confirm-ws", nil)
+	if err != nil {
+		return "", "", err
+	}
+	defer conn.Close()
+	req := trayApprovalRequest{Approval: approval, WorkingDir: workingDir, Summary: approval.PromptText}
+	if err := conn.WriteJSON(req); err != nil {
+		return "", "", err
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Minute))
+	var decoded struct {
+		Type string               `json:"type"`
+		Data trayDecisionResponse `json:"data"`
+	}
+	if err := conn.ReadJSON(&decoded); err != nil {
+		return "", "", err
+	}
+	if decoded.Data.DecisionType == "" {
+		return "", "", errors.New("websocket tray decision missing")
+	}
+	return decoded.Data.DecisionType, decoded.Data.Payload, nil
+}
+
+func requestTrayDecisionHTTP(approval localApproval, workingDir string) (string, string, error) {
 	body, err := json.Marshal(trayApprovalRequest{Approval: approval, WorkingDir: workingDir, Summary: approval.PromptText})
 	if err != nil {
 		return "", "", err
@@ -409,6 +479,54 @@ func requestTrayDecision(approval localApproval, workingDir string) (string, str
 		return "", "", errors.New("tray decision missing")
 	}
 	return decoded.Data.DecisionType, decoded.Data.Payload, nil
+}
+
+type runtimeEventStream struct {
+	conn *websocket.Conn
+	mu   sync.Mutex
+}
+
+func connectRuntimeEventStream() *runtimeEventStream {
+	conn, _, err := websocket.DefaultDialer.Dial("ws://"+trayListenAddress()+"/api/local/gp/events", nil)
+	if err != nil {
+		return nil
+	}
+	return &runtimeEventStream{conn: conn}
+}
+
+func (s *runtimeEventStream) Send(eventType string, data any) {
+	if s == nil || s.conn == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_ = s.conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
+	if err := s.conn.WriteJSON(map[string]any{"type": eventType, "data": data}); err != nil {
+		_ = s.conn.Close()
+		s.conn = nil
+	}
+}
+
+func (s *runtimeEventStream) Close() {
+	if s == nil || s.conn == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_ = s.conn.Close()
+	s.conn = nil
+}
+
+func liveOutputRecord(record localOutputRecord, rawContent string) map[string]any {
+	return map[string]any{
+		"session_id":       record.SessionID,
+		"sequence_no":      record.SequenceNo,
+		"stream_type":      record.StreamType,
+		"content_redacted": record.ContentRedacted,
+		"content":          rawContent,
+		"content_hash":     record.ContentHash,
+		"created_at":       record.CreatedAt,
+	}
 }
 
 func ensureTrayRunning() {

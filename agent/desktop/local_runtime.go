@@ -18,6 +18,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/gorilla/websocket"
 )
 
 type agentLocalSettings = AgentLocalSettings
@@ -107,9 +109,10 @@ type runtimePendingApproval struct {
 }
 
 type localRuntimeState struct {
-	mu       sync.Mutex
-	settings agentLocalSettings
-	pending  *runtimePendingApproval
+	mu           sync.Mutex
+	settings     agentLocalSettings
+	pending      *runtimePendingApproval
+	eventClients map[*runtimeEventClient]bool
 }
 
 type aiToolSessionFilter struct {
@@ -123,6 +126,28 @@ type aiToolDeleteResult struct {
 	ToolID    string   `json:"tool_id"`
 	Moved     []string `json:"moved"`
 	Updated   []string `json:"updated"`
+}
+
+type runtimeEventEnvelope struct {
+	Type string `json:"type"`
+	Data any    `json:"data"`
+}
+
+type runtimeEventClient struct {
+	conn *websocket.Conn
+	mu   sync.Mutex
+}
+
+type gpRuntimeEvent struct {
+	Type string          `json:"type"`
+	Data json.RawMessage `json:"data"`
+}
+
+var runtimeWebSocketUpgrader = websocket.Upgrader{
+	CheckOrigin: func(r *http.Request) bool {
+		host := strings.ToLower(r.Host)
+		return strings.HasPrefix(host, "127.0.0.1:") || strings.HasPrefix(host, "localhost:")
+	},
 }
 
 var (
@@ -144,7 +169,7 @@ func startLocalRuntime() error {
 	if err != nil {
 		return err
 	}
-	state := &localRuntimeState{settings: settings}
+	state := &localRuntimeState{settings: settings, eventClients: map[*runtimeEventClient]bool{}}
 	listener, err := net.Listen("tcp", trayAddr)
 	if err != nil {
 		if trayHealthy() {
@@ -253,6 +278,15 @@ func newLocalRuntimeHandler(state *localRuntimeState) http.Handler {
 		}
 		writeRuntimeJSON(w, map[string]any{"data": state.confirmApproval(req)})
 	})
+	mux.HandleFunc("/api/local/approvals/confirm-ws", func(w http.ResponseWriter, r *http.Request) {
+		state.handleApprovalWebSocket(w, r)
+	})
+	mux.HandleFunc("/api/local/gp/events", func(w http.ResponseWriter, r *http.Request) {
+		state.handleGPEventWebSocket(w, r)
+	})
+	mux.HandleFunc("/api/local/events", func(w http.ResponseWriter, r *http.Request) {
+		state.handleEventSubscriberWebSocket(w, r)
+	})
 	mux.HandleFunc("/api/local/sessions", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -350,9 +384,143 @@ func (s *localRuntimeState) completePending(decision trayDecisionResponse) bool 
 	return true
 }
 
+func (s *localRuntimeState) handleApprovalWebSocket(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	conn, err := runtimeWebSocketUpgrader.Upgrade(w, r, nil)
+	if err != nil {
+		return
+	}
+	defer conn.Close()
+	var req trayApprovalRequest
+	if err := conn.ReadJSON(&req); err != nil {
+		_ = conn.WriteJSON(map[string]any{"type": "error", "error": err.Error()})
+		return
+	}
+	if req.Approval.ApprovalID == "" {
+		req.Approval.ApprovalID = "local"
+	}
+	decision := s.confirmApproval(req)
+	_ = conn.WriteJSON(map[string]any{"type": "approval_decision", "data": decision})
+}
+
+func (s *localRuntimeState) handleGPEventWebSocket(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	conn, err := runtimeWebSocketUpgrader.Upgrade(w, r, nil)
+	if err != nil {
+		return
+	}
+	defer conn.Close()
+	for {
+		var event gpRuntimeEvent
+		if err := conn.ReadJSON(&event); err != nil {
+			return
+		}
+		event.Type = strings.TrimSpace(event.Type)
+		if event.Type == "" {
+			continue
+		}
+		s.handleGPEvent(event)
+	}
+}
+
+func (s *localRuntimeState) handleGPEvent(event gpRuntimeEvent) {
+	switch event.Type {
+	case "session_started", "session_updated":
+		var session SessionRecord
+		if err := json.Unmarshal(event.Data, &session); err == nil && session.SessionID != "" {
+			s.broadcastEvent(event.Type, session)
+		}
+	case "output":
+		var output map[string]any
+		if err := json.Unmarshal(event.Data, &output); err == nil {
+			s.broadcastEvent("output", output)
+		}
+	case "approval", "decision":
+		var item map[string]any
+		if err := json.Unmarshal(event.Data, &item); err == nil {
+			s.broadcastEvent(event.Type, item)
+		}
+	default:
+		var item map[string]any
+		_ = json.Unmarshal(event.Data, &item)
+		s.broadcastEvent(event.Type, item)
+	}
+}
+
+func (s *localRuntimeState) handleEventSubscriberWebSocket(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	conn, err := runtimeWebSocketUpgrader.Upgrade(w, r, nil)
+	if err != nil {
+		return
+	}
+	client := &runtimeEventClient{conn: conn}
+	s.addEventClient(client)
+	defer func() {
+		s.removeEventClient(client)
+		_ = conn.Close()
+	}()
+	for {
+		if _, _, err := conn.ReadMessage(); err != nil {
+			return
+		}
+	}
+}
+
+func (s *localRuntimeState) addEventClient(client *runtimeEventClient) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.eventClients == nil {
+		s.eventClients = map[*runtimeEventClient]bool{}
+	}
+	s.eventClients[client] = true
+}
+
+func (s *localRuntimeState) removeEventClient(client *runtimeEventClient) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.eventClients, client)
+}
+
+func (s *localRuntimeState) broadcastEvent(eventType string, data any) {
+	s.mu.Lock()
+	clients := make([]*runtimeEventClient, 0, len(s.eventClients))
+	for client := range s.eventClients {
+		clients = append(clients, client)
+	}
+	s.mu.Unlock()
+	if len(clients) == 0 {
+		return
+	}
+	message := runtimeEventEnvelope{Type: eventType, Data: data}
+	for _, client := range clients {
+		client.mu.Lock()
+		_ = client.conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
+		err := client.conn.WriteJSON(message)
+		client.mu.Unlock()
+		if err != nil {
+			s.removeEventClient(client)
+			_ = client.conn.Close()
+		}
+	}
+}
+
 func (s *localRuntimeState) confirmApproval(req trayApprovalRequest) trayDecisionResponse {
 	settings := s.currentSettings()
 	pending := s.setPending(req)
+	s.broadcastEvent("approval", map[string]any{
+		"approval":    req.Approval,
+		"working_dir": req.WorkingDir,
+		"summary":     req.Summary,
+	})
 	if settings.NotificationEnabled && settings.NotificationStyle != "none" {
 		go func() {
 			decision, payload, err := showApprovalNotification(settings, req)
@@ -365,9 +533,23 @@ func (s *localRuntimeState) confirmApproval(req trayApprovalRequest) trayDecisio
 	}
 	select {
 	case decision := <-pending.Response:
+		s.broadcastEvent("decision", map[string]any{
+			"approval_id":   req.Approval.ApprovalID,
+			"session_id":    req.Approval.SessionID,
+			"decision_type": decision.DecisionType,
+			"payload":       decision.Payload,
+			"result":        decision.Result,
+		})
 		return decision
 	case <-time.After(10 * time.Minute):
-		return trayDecisionResponse{DecisionType: "reject", Result: "timeout"}
+		decision := trayDecisionResponse{DecisionType: "reject", Result: "timeout"}
+		s.broadcastEvent("decision", map[string]any{
+			"approval_id":   req.Approval.ApprovalID,
+			"session_id":    req.Approval.SessionID,
+			"decision_type": decision.DecisionType,
+			"result":        decision.Result,
+		})
+		return decision
 	}
 }
 

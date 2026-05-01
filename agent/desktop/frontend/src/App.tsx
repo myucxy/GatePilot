@@ -151,6 +151,37 @@ function App() {
   }, []);
 
   useEffect(() => {
+    let stopped = false;
+    let socket: WebSocket | null = null;
+    let retry: number | undefined;
+
+    function connect() {
+      if (stopped) return;
+      socket = new WebSocket('ws://127.0.0.1:18731/api/local/events');
+      socket.onmessage = (message) => {
+        try {
+          handleRuntimeEvent(JSON.parse(message.data));
+        } catch (err) {
+          console.warn('runtime event parse failed', err);
+        }
+      };
+      socket.onclose = () => {
+        if (!stopped) retry = window.setTimeout(connect, 1000);
+      };
+      socket.onerror = () => {
+        socket?.close();
+      };
+    }
+
+    connect();
+    return () => {
+      stopped = true;
+      if (retry) window.clearTimeout(retry);
+      socket?.close();
+    };
+  }, [selectedSession]);
+
+  useEffect(() => {
     if (tab === 'processes') {
       loadSessions();
     }
@@ -346,6 +377,46 @@ function App() {
 
   function showError(err: unknown) {
     setError(String(err));
+  }
+
+  function handleRuntimeEvent(event: {type?: string; data?: Record<string, unknown>}) {
+    const type = event.type || '';
+    const data = event.data || {};
+    if (type === 'session_started' || type === 'session_updated') {
+      const session = data as unknown as Session;
+      if (session.session_id) {
+        setSessions((current) => upsertSession(current, session));
+        setDetail((current) => current && current.session.session_id === session.session_id
+          ? {...current, session: {...current.session, ...session}}
+          : current);
+      }
+      return;
+    }
+    if (type === 'output') {
+      const sessionID = String(data.session_id || '');
+      if (!sessionID) return;
+      setSessions((current) => current.map((item) => item.session_id === sessionID
+        ? {...item, last_output_summary: String(data.content_redacted || data.content || item.last_output_summary)}
+        : item));
+      if (sessionID === selectedSession) {
+        setDetail((current) => current
+          ? {...current, output: appendRecord(current.output || [], data)}
+          : current);
+      }
+      return;
+    }
+    if (type === 'approval' || type === 'decision') {
+      const raw = (data.approval || data) as Record<string, unknown>;
+      const sessionID = String(raw.session_id || data.session_id || '');
+      if (sessionID) loadSessions();
+      if (sessionID && sessionID === selectedSession) {
+        setDetail((current) => {
+          if (!current) return current;
+          if (type === 'approval') return {...current, approvals: appendRecord(current.approvals || [], raw)};
+          return {...current, decisions: appendRecord(current.decisions || [], data)};
+        });
+      }
+    }
   }
 
   return (
@@ -720,6 +791,25 @@ function InfoCard({label, value, wide}: {label: string; value: string; wide?: bo
       <strong>{value || '-'}</strong>
     </div>
   );
+}
+
+function upsertSession(items: Session[], session: Session) {
+  const next = [...items];
+  const index = next.findIndex((item) => item.session_id === session.session_id);
+  if (index >= 0) {
+    next[index] = {...next[index], ...session};
+  } else {
+    next.unshift(session);
+  }
+  return next;
+}
+
+function appendRecord(items: Record<string, unknown>[], record: Record<string, unknown>) {
+  const sequence = record.sequence_no;
+  if (sequence !== undefined && items.some((item) => item.sequence_no === sequence && item.session_id === record.session_id)) {
+    return items;
+  }
+  return [...items, record].slice(-500);
 }
 
 function ReadableOutput({title, records}: {title: string; records: Record<string, unknown>[]}) {
