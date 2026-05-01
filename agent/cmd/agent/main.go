@@ -689,9 +689,14 @@ func (d *interactiveApprovalDetector) handleApproval(event adapter.DetectedEvent
 		PendingApprovals:  1,
 	})
 
-	decisionType, payload, err := requestTrayDecision(approval, d.workingDir, io.Discard)
-	if err != nil {
-		decisionType, payload, err = fallbackLocalApprovalDecision(approval)
+	decisionType := strings.TrimSpace(d.options.Decision)
+	payload := d.options.Payload
+	var err error
+	if decisionType == "" {
+		decisionType, payload, err = requestTrayDecision(approval, d.workingDir, io.Discard)
+		if err != nil {
+			decisionType, payload, err = fallbackLocalApprovalDecision(approval)
+		}
 	}
 	if err != nil {
 		d.finishApprovalPending(event.PromptText)
@@ -770,30 +775,65 @@ func fallbackLocalApprovalDecision(approval localApproval) (string, string, erro
 
 func cleanTerminalText(value string) string {
 	var out strings.Builder
-	inEscape := false
-	for _, r := range value {
-		if inEscape {
-			if (r >= '@' && r <= '~') || r == '\a' {
-				inEscape = false
-			}
+	for i := 0; i < len(value); i++ {
+		b := value[i]
+		if b == '\x1b' {
+			i = skipANSISequence(value, i)
 			continue
 		}
-		if r == '\x1b' {
-			inEscape = true
-			continue
-		}
-		switch r {
+		switch b {
 		case '\r':
 			out.WriteByte('\n')
 		case '\n', '\t':
-			out.WriteRune(r)
+			out.WriteByte(b)
 		default:
-			if r >= 32 {
-				out.WriteRune(r)
+			if b >= 32 {
+				out.WriteByte(b)
 			}
 		}
 	}
 	return out.String()
+}
+
+func skipANSISequence(value string, escIndex int) int {
+	next := escIndex + 1
+	if next >= len(value) {
+		return escIndex
+	}
+	switch value[next] {
+	case '[':
+		return skipCSISequence(value, next+1)
+	case ']':
+		return skipStringTerminatedSequence(value, next+1)
+	case 'P', '^', '_', 'X':
+		return skipStringTerminatedSequence(value, next+1)
+	default:
+		return next
+	}
+}
+
+func skipCSISequence(value string, start int) int {
+	for i := start; i < len(value); i++ {
+		b := value[i]
+		if b >= 0x40 && b <= 0x7e {
+			return i
+		}
+	}
+	return len(value) - 1
+}
+
+func skipStringTerminatedSequence(value string, start int) int {
+	for i := start; i < len(value); i++ {
+		switch value[i] {
+		case '\a':
+			return i
+		case '\x1b':
+			if i+1 < len(value) && value[i+1] == '\\' {
+				return i + 1
+			}
+		}
+	}
+	return len(value) - 1
 }
 
 func aiToolTypeForCLI(cliType string) string {

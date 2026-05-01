@@ -87,7 +87,7 @@ func (a ruleAdapter) Type() string {
 
 func (a ruleAdapter) Detect(snapshot TerminalSnapshot) []DetectedEvent {
 	text := snapshotText(snapshot)
-	if text == "" || !containsAllFold(text, a.promptMarkers) {
+	if text == "" || !a.matchesPrompt(text) {
 		return nil
 	}
 
@@ -129,7 +129,16 @@ func (a ruleAdapter) IsPromptStillActive(snapshot TerminalSnapshot, event Approv
 	if event.PromptText != "" && strings.Contains(strings.ToLower(text), strings.ToLower(event.PromptText)) {
 		return true
 	}
-	return containsAllFold(text, a.promptMarkers)
+	return a.matchesPrompt(text)
+}
+
+func (a ruleAdapter) matchesPrompt(text string) bool {
+	switch a.cliType {
+	case "codex":
+		return looksLikeCodexApprovalPrompt(text)
+	default:
+		return containsAllFold(text, a.promptMarkers)
+	}
 }
 
 func snapshotText(snapshot TerminalSnapshot) string {
@@ -149,7 +158,14 @@ func firstPromptLine(snapshot TerminalSnapshot) string {
 	}
 	for _, line := range lines {
 		lower := strings.ToLower(line)
-		if strings.Contains(lower, "permission") || strings.Contains(lower, "allow") || strings.Contains(lower, "approve") {
+		if strings.Contains(lower, "permission") ||
+			strings.Contains(lower, "approval") ||
+			strings.Contains(lower, "allow") ||
+			strings.Contains(lower, "approve") ||
+			strings.Contains(lower, "deny") ||
+			strings.Contains(lower, "reject") ||
+			strings.Contains(lower, "run command") ||
+			strings.Contains(lower, "continue anyway") {
 			return strings.TrimSpace(line)
 		}
 	}
@@ -175,6 +191,58 @@ func containsAllFold(text string, markers []string) bool {
 		}
 	}
 	return true
+}
+
+func looksLikeCodexApprovalPrompt(text string) bool {
+	normalized := normalizePromptText(text)
+	if normalized == "" {
+		return false
+	}
+	hasApprovalWord := containsAnyFold(normalized, "approval", "permission", "approve", "allow", "continue anyway", "yes")
+	hasRejectWord := containsAnyFold(normalized, "reject", "deny", "no")
+	hasActionWord := containsAnyFold(normalized, "command", "exec", "execute", "run", "shell", "write", "edit", "modify", "patch", "apply")
+	hasQuestionWord := containsAnyFold(normalized, "do you want", "would you like", "proceed", "continue", "?")
+
+	switch {
+	case containsAllFold(normalized, []string{"requires approval"}):
+		return true
+	case containsAnyFold(normalized, "allow", "approve") && hasRejectWord && hasActionWord:
+		return true
+	case containsAnyFold(normalized, "permission", "approval") &&
+		containsAnyFold(normalized, "yes", "no", "reject", "deny") &&
+		hasActionWord &&
+		containsAnyFold(normalized, "?", "required", "request", "approve", "allow"):
+		return true
+	case hasQuestionWord && hasApprovalWord && hasActionWord:
+		return true
+	case containsAllFold(normalized, []string{"run command"}) && containsAnyFold(normalized, "allow", "approve", "yes", "no", "deny", "reject"):
+		return true
+	default:
+		return false
+	}
+}
+
+func normalizePromptText(text string) string {
+	lower := strings.ToLower(text)
+	replacer := strings.NewReplacer(
+		"\r", "\n",
+		"╭", " ", "╮", " ", "╰", " ", "╯", " ",
+		"│", " ", "─", " ", "┌", " ", "┐", " ", "└", " ", "┘", " ",
+		"•", " ", "›", " ", "❯", " ", "…", " ",
+	)
+	lower = replacer.Replace(lower)
+	fields := strings.Fields(lower)
+	return strings.Join(fields, " ")
+}
+
+func containsAnyFold(text string, markers ...string) bool {
+	lower := strings.ToLower(text)
+	for _, marker := range markers {
+		if strings.Contains(lower, strings.ToLower(marker)) {
+			return true
+		}
+	}
+	return false
 }
 
 func riskLevelForPrompt(text string) string {

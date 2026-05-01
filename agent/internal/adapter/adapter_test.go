@@ -1,6 +1,9 @@
 package adapter
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestAdaptersDetectPermissionPrompts(t *testing.T) {
 	tests := []struct {
@@ -9,6 +12,9 @@ func TestAdaptersDetectPermissionPrompts(t *testing.T) {
 	}{
 		{cliType: "custom", text: "GatePilot fake AI CLI\npermission_request: allow command execution? [approve/reject/reply]\nwaiting_for_input"},
 		{cliType: "codex", text: "Codex needs permission to run command\nApprove or reject?"},
+		{cliType: "codex", text: "Codex requires approval\nAllow this command?\n  Y yes\n  N no"},
+		{cliType: "codex", text: "Run command: powershell.exe -NoProfile\nAllow / Deny"},
+		{cliType: "codex", text: "Continue anyway?\nCodex wants to execute a shell command\nYes / No"},
 		{cliType: "claude_code", text: "Claude Code asks: do you want to proceed?\n1. Yes\n2. No"},
 		{cliType: "opencode", text: "OpenCode permission request\nAllow or deny command execution"},
 		{cliType: "copilot", text: "GitHub Copilot needs approval\napprove / reject"},
@@ -76,6 +82,22 @@ func TestReplyRequiresPayload(t *testing.T) {
 	_, err := ForCLI("custom").BuildDecisionInput(ApprovalEvent{}, Decision{Type: "reply"})
 	if err == nil {
 		t.Fatal("BuildDecisionInput(reply) error = nil, want error")
+	}
+}
+
+func TestCodexAdapterIgnoresOrdinaryOutput(t *testing.T) {
+	tests := []string{
+		"Codex is thinking\nrunning analysis\ncommand output finished successfully",
+		"command failed: permission denied",
+	}
+	for _, text := range tests {
+		events := ForCLI("codex").Detect(TerminalSnapshot{
+			VisibleText: text,
+			RecentLines: strings.Split(text, "\n"),
+		})
+		if len(events) != 0 {
+			t.Fatalf("Detect(%q) event count = %d, want 0", text, len(events))
+		}
 	}
 }
 

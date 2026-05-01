@@ -250,6 +250,26 @@ func TestConPTYFallbackOnlyForImmediateDLLInitFailure(t *testing.T) {
 	}
 }
 
+func TestCleanTerminalTextRemovesConPTYControlSequences(t *testing.T) {
+	input := "\x1b[?2026h\x1b[13;2H╭─ Codex ─╮\x1b[K\r\n\x1b]0;GatePilot\aAllow this command?\x1b[?25h"
+	got := cleanTerminalText(input)
+	for _, fragment := range []string{"?2026h", "13;2H", "0;GatePilot", "?25h"} {
+		if strings.Contains(got, fragment) {
+			t.Fatalf("cleaned text = %q, still contains control fragment %q", got, fragment)
+		}
+	}
+	if !strings.Contains(got, "Codex") || !strings.Contains(got, "Allow this command?") {
+		t.Fatalf("cleaned text = %q, want visible prompt text", got)
+	}
+}
+
+func TestCleanTerminalTextPreservesUTF8Text(t *testing.T) {
+	got := cleanTerminalText("\x1b[?25l通过 / 拒绝\x1b[?25h")
+	if got != "通过 / 拒绝" {
+		t.Fatalf("cleaned text = %q, want Chinese text preserved", got)
+	}
+}
+
 func TestLocalDecisionInputUsesPopupDecisionOverride(t *testing.T) {
 	t.Setenv("GATEPILOT_AGENT_POPUP_DECISION", "reject")
 	var output bytes.Buffer
