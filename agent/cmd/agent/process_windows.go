@@ -38,7 +38,10 @@ func startInteractiveCommand(options interactiveCommandOptions) (*interactiveCom
 	if len(options.Args) == 0 {
 		return nil, fmt.Errorf("missing command")
 	}
-	args := resolveWindowsCommandArgs(options.Args)
+	command, err := resolveWindowsCommand(options.Args)
+	if err != nil {
+		return nil, err
+	}
 	inRead, inWrite, err := createWindowsPipe()
 	if err != nil {
 		return nil, err
@@ -50,38 +53,54 @@ func startInteractiveCommand(options interactiveCommandOptions) (*interactiveCom
 		return nil, err
 	}
 	pseudoConsole, err := createPseudoConsole(consoleSize(), inRead, outWrite)
-	_ = windows.CloseHandle(inRead)
-	_ = windows.CloseHandle(outWrite)
 	if err != nil {
+		_ = windows.CloseHandle(inRead)
 		_ = windows.CloseHandle(inWrite)
 		_ = windows.CloseHandle(outRead)
+		_ = windows.CloseHandle(outWrite)
 		return nil, err
 	}
 
 	attrList, err := windows.NewProcThreadAttributeList(1)
 	if err != nil {
 		closePseudoConsole(pseudoConsole)
+		_ = windows.CloseHandle(inRead)
 		_ = windows.CloseHandle(inWrite)
 		_ = windows.CloseHandle(outRead)
+		_ = windows.CloseHandle(outWrite)
 		return nil, err
 	}
-	if err := attrList.Update(procThreadAttributePseudoConsole, unsafe.Pointer(&pseudoConsole), unsafe.Sizeof(pseudoConsole)); err != nil {
+	if err := attrList.Update(procThreadAttributePseudoConsole, unsafe.Pointer(uintptr(pseudoConsole)), unsafe.Sizeof(pseudoConsole)); err != nil {
 		attrList.Delete()
 		closePseudoConsole(pseudoConsole)
+		_ = windows.CloseHandle(inRead)
 		_ = windows.CloseHandle(inWrite)
 		_ = windows.CloseHandle(outRead)
+		_ = windows.CloseHandle(outWrite)
 		return nil, err
 	}
 	startupInfo := windows.StartupInfoEx{
 		StartupInfo:             windows.StartupInfo{Cb: uint32(unsafe.Sizeof(windows.StartupInfoEx{}))},
 		ProcThreadAttributeList: attrList.List(),
 	}
-	commandLine, err := windows.UTF16PtrFromString(windows.ComposeCommandLine(args))
+	commandLine, err := windows.UTF16PtrFromString(windows.ComposeCommandLine(command.Args))
 	if err != nil {
 		attrList.Delete()
 		closePseudoConsole(pseudoConsole)
+		_ = windows.CloseHandle(inRead)
 		_ = windows.CloseHandle(inWrite)
 		_ = windows.CloseHandle(outRead)
+		_ = windows.CloseHandle(outWrite)
+		return nil, err
+	}
+	appName, err := windows.UTF16PtrFromString(command.ApplicationName)
+	if err != nil {
+		attrList.Delete()
+		closePseudoConsole(pseudoConsole)
+		_ = windows.CloseHandle(inRead)
+		_ = windows.CloseHandle(inWrite)
+		_ = windows.CloseHandle(outRead)
+		_ = windows.CloseHandle(outWrite)
 		return nil, err
 	}
 	var currentDir *uint16
@@ -90,14 +109,18 @@ func startInteractiveCommand(options interactiveCommandOptions) (*interactiveCom
 		if err != nil {
 			attrList.Delete()
 			closePseudoConsole(pseudoConsole)
+			_ = windows.CloseHandle(inRead)
 			_ = windows.CloseHandle(inWrite)
 			_ = windows.CloseHandle(outRead)
+			_ = windows.CloseHandle(outWrite)
 			return nil, err
 		}
 	}
 	var procInfo windows.ProcessInformation
-	err = windows.CreateProcess(nil, commandLine, nil, nil, false, windows.EXTENDED_STARTUPINFO_PRESENT, nil, currentDir, &startupInfo.StartupInfo, &procInfo)
+	err = windows.CreateProcess(appName, commandLine, nil, nil, false, windows.EXTENDED_STARTUPINFO_PRESENT, nil, currentDir, &startupInfo.StartupInfo, &procInfo)
 	attrList.Delete()
+	_ = windows.CloseHandle(inRead)
+	_ = windows.CloseHandle(outWrite)
 	if err != nil {
 		closePseudoConsole(pseudoConsole)
 		_ = windows.CloseHandle(inWrite)
@@ -156,17 +179,31 @@ func startInteractiveCommand(options interactiveCommandOptions) (*interactiveCom
 	}, nil
 }
 
-func resolveWindowsCommandArgs(args []string) []string {
-	resolved := append([]string{}, args...)
-	if path, err := exec.LookPath(args[0]); err == nil {
-		ext := strings.ToLower(filepath.Ext(path))
-		if ext == ".cmd" || ext == ".bat" {
-			comspec := getenv("ComSpec", "cmd.exe")
-			return []string{comspec, "/d", "/s", "/c", windows.ComposeCommandLine(append([]string{path}, args[1:]...))}
-		}
-		resolved[0] = path
+type windowsCommand struct {
+	ApplicationName string
+	Args            []string
+}
+
+func resolveWindowsCommand(args []string) (windowsCommand, error) {
+	path, err := exec.LookPath(args[0])
+	if err != nil {
+		return windowsCommand{}, err
 	}
-	return resolved
+	ext := strings.ToLower(filepath.Ext(path))
+	if ext == ".cmd" || ext == ".bat" {
+		comspec := getenv("ComSpec", "cmd.exe")
+		comspecPath, err := exec.LookPath(comspec)
+		if err != nil {
+			return windowsCommand{}, err
+		}
+		return windowsCommand{
+			ApplicationName: comspecPath,
+			Args:            []string{comspecPath, "/d", "/s", "/c", windows.ComposeCommandLine(append([]string{path}, args[1:]...))},
+		}, nil
+	}
+	resolved := append([]string{}, args...)
+	resolved[0] = path
+	return windowsCommand{ApplicationName: path, Args: resolved}, nil
 }
 
 func createWindowsPipe() (windows.Handle, windows.Handle, error) {
