@@ -354,7 +354,7 @@ function App() {
         <div className="brand">
           <div className="mark">GP</div>
           <div>
-            <h1>GatePilot Agent</h1>
+            <h1>GataPilot客户端</h1>
             <p>{status?.offline ? '离线本地模式' : '在线配置模式'}</p>
           </div>
         </div>

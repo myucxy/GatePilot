@@ -1,8 +1,9 @@
 $ErrorActionPreference = "Stop"
 
 $repoRoot = Resolve-Path "$PSScriptRoot\.."
-$distRoot = Join-Path $repoRoot "dist\gatepilot-agent-windows-amd64"
-$packagePath = Join-Path $repoRoot "dist\gatepilot-agent-windows-amd64.zip"
+$distRoot = Join-Path $repoRoot "dist\gatepilot-client-windows-amd64"
+$packagePath = Join-Path $repoRoot "dist\gatepilot-client-windows-amd64.zip"
+$clientExeName = "GataPilot" + [string][char]0x5BA2 + [string][char]0x6237 + [string][char]0x7AEF + ".exe"
 
 function Resolve-Go {
     if ($env:GATEPILOT_GO -and (Test-Path $env:GATEPILOT_GO)) {
@@ -61,40 +62,10 @@ try {
 finally {
     Pop-Location
 }
-Copy-Item -LiteralPath (Join-Path $repoRoot "agent\desktop\build\bin\gatepilot-agent-desktop.exe") -Destination (Join-Path $distRoot "gatepilot-agent-desktop.exe") -Force
+Copy-Item -LiteralPath (Join-Path $repoRoot "agent\desktop\build\bin\$clientExeName") -Destination (Join-Path $distRoot $clientExeName) -Force
 
-$readme = @'
-# GatePilot Windows AMD64
-
-本包只包含桌面版和 gp 命令：
-
-- `gatepilot-agent-desktop.exe`：桌面客户端，同时提供本地提醒、确认和历史接口。
-- `gp.exe`：AI CLI 托管入口，用于启动 Codex 或 Claude，并把确认请求交给桌面版处理。
-
-启动桌面版：
-
-```powershell
-.\gatepilot-agent-desktop.exe
-```
-
-桌面版启动后会在本机提供 `127.0.0.1:18731` 本地接口。日常配置、登录、离线模式、提醒开关、AI 工具历史来源、GP 子进程和会话历史都在桌面客户端里完成，不需要打开网页，也不再需要单独的 `gatepilot-agent.exe`。
-
-托管 Codex/Claude：
-
-```powershell
-.\gp.exe codex
-.\gp.exe claude
-```
-
-如果桌面版没有运行，`gp.exe` 会自动启动同目录的 `gatepilot-agent-desktop.exe`。确认请求会通过桌面版弹窗处理，最终写回当前 CLI。
-
-需要全局使用 `gp` 时，把当前目录加入用户 PATH，之后新打开的终端可以使用：
-
-```powershell
-gp codex
-gp claude
-```
-'@
+$readmeBase64 = "IyBHYXRhUGlsb3TlrqLmiLfnq68gV2luZG93cyBBTUQ2NAoK5pys5YyF5Y+q5YyF5ZCr5qGM6Z2i54mI5ZKMIGdwIOWRveS7pO+8mgoKLSBgR2F0YVBpbG905a6i5oi356uvLmV4ZWDvvJrmoYzpnaLlrqLmiLfnq6/vvIzlkIzml7bmj5DkvpvmnKzlnLDmj5DphpLjgIHnoa7orqTlkozljoblj7LmjqXlj6PjgIIKLSBgZ3AuZXhlYO+8mkFJIENMSSDmiZjnrqHlhaXlj6PvvIznlKjkuo7lkK/liqggQ29kZXgg5oiWIENsYXVkZe+8jOW5tuaKiuehruiupOivt+axguS6pOe7meahjOmdoueJiOWkhOeQhuOAggoK5ZCv5Yqo5qGM6Z2i54mI77yaCgpgYGBwb3dlcnNoZWxsCi5cR2F0YVBpbG905a6i5oi356uvLmV4ZQpgYGAKCuahjOmdoueJiOWQr+WKqOWQjuS8muWcqOacrOacuuaPkOS+myBgMTI3LjAuMC4xOjE4NzMxYCDmnKzlnLDmjqXlj6PjgILml6XluLjphY3nva7jgIHnmbvlvZXjgIHnprvnur/mqKHlvI/jgIHmj5DphpLlvIDlhbPjgIFBSSDlt6Xlhbfljoblj7LmnaXmupDjgIFHUCDlrZDov5vnqIvlkozkvJror53ljoblj7Lpg73lnKjmoYzpnaLlrqLmiLfnq6/ph4zlrozmiJDvvIzkuI3pnIDopoHmiZPlvIDnvZHpobXvvIzkuZ/kuI3lho3pnIDopoHljZXni6znmoQgYGdhdGVwaWxvdC1hZ2VudC5leGVg44CCCgrmiZjnrqEgQ29kZXgvQ2xhdWRl77yaCgpgYGBwb3dlcnNoZWxsCi5cZ3AuZXhlIGNvZGV4Ci5cZ3AuZXhlIGNsYXVkZQpgYGAKCuWmguaenOahjOmdoueJiOayoeaciei/kOihjO+8jGBncC5leGVgIOS8muiHquWKqOWQr+WKqOWQjOebruW9leeahCBgR2F0YVBpbG905a6i5oi356uvLmV4ZWDjgILnoa7orqTor7fmsYLkvJrpgJrov4fmoYzpnaLniYjlvLnnqpflpITnkIbvvIzmnIDnu4jlhpnlm57lvZPliY0gQ0xJ44CCCgrpnIDopoHlhajlsYDkvb/nlKggYGdwYCDml7bvvIzmiorlvZPliY3nm67lvZXliqDlhaXnlKjmiLcgUEFUSO+8jOS5i+WQjuaWsOaJk+W8gOeahOe7iOerr+WPr+S7peS9v+eUqO+8mgoKYGBgcG93ZXJzaGVsbApncCBjb2RleApncCBjbGF1ZGUKYGBg"
+$readme = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($readmeBase64))
 $readme | Set-Content -Path (Join-Path $distRoot "README.md") -Encoding UTF8
 
 if (Test-Path $packagePath) {
@@ -104,6 +75,6 @@ Compress-Archive -Path (Join-Path $distRoot "*") -DestinationPath $packagePath
 
 [pscustomobject]@{
     gp = Join-Path $distRoot "gp.exe"
-    desktop = Join-Path $distRoot "gatepilot-agent-desktop.exe"
+    desktop = Join-Path $distRoot $clientExeName
     package = $packagePath
 } | ConvertTo-Json

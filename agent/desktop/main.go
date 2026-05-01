@@ -17,7 +17,7 @@ func main() {
 
 	// Create application with options
 	err := wails.Run(&options.App{
-		Title:  "GatePilot Agent",
+		Title:  "GataPilot客户端",
 		Width:  1180,
 		Height: 760,
 		AssetServer: &assetserver.Options{

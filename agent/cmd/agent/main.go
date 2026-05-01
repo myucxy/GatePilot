@@ -3328,30 +3328,14 @@ func windowsApprovalPopup(message string) (string, error) {
 	if strings.TrimSpace(message) == "" {
 		message = "GatePilot needs your confirmation.\n\nChoose Yes to approve, or No to reject."
 	}
-	script := `$ErrorActionPreference = "Stop"
-Add-Type -AssemblyName System.Windows.Forms
-$form = New-Object System.Windows.Forms.Form
-$form.TopMost = $true
-$form.ShowInTaskbar = $false
-$form.WindowState = [System.Windows.Forms.FormWindowState]::Minimized
-$form.Load.Add({ $form.Hide() })
-$form.Show()
-$result = [System.Windows.Forms.MessageBox]::Show($form, $env:GATEPILOT_POPUP_TEXT, "GatePilot Approval", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning, [System.Windows.Forms.MessageBoxDefaultButton]::Button2)
-$form.Dispose()
-if ($result -eq [System.Windows.Forms.DialogResult]::Yes) { "approve" } else { "reject" }`
-	cmd := exec.Command("powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-STA", "-Command", script)
-	cmd.Env = append(os.Environ(), "GATEPILOT_POPUP_TEXT="+message)
-	output, err := cmd.CombinedOutput()
+	approved, err := nativeApprovalMessageBox("GatePilot Approval", message)
 	if err != nil {
-		return "", fmt.Errorf("%v: %s", err, strings.TrimSpace(string(output)))
+		return "", err
 	}
-	decision := strings.TrimSpace(string(output))
-	switch decision {
-	case "approve", "reject":
-		return decision, nil
-	default:
-		return "", fmt.Errorf("unexpected popup result %q", decision)
+	if approved {
+		return "approve", nil
 	}
+	return "reject", nil
 }
 
 func windowsApprovalMiniWindow(message string) (string, string, error) {
@@ -3369,82 +3353,14 @@ func windowsApprovalMiniWindow(message string) (string, string, error) {
 	if strings.TrimSpace(message) == "" {
 		message = "GatePilot needs your confirmation."
 	}
-	script := `$ErrorActionPreference = "Stop"
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName System.Drawing
-Add-Type -AssemblyName Microsoft.VisualBasic
-$form = New-Object System.Windows.Forms.Form
-$form.Text = "GatePilot Approval"
-$form.Width = 420
-$form.Height = 250
-$form.TopMost = $true
-$form.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedDialog
-$form.MaximizeBox = $false
-$form.MinimizeBox = $false
-$screen = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
-$form.StartPosition = [System.Windows.Forms.FormStartPosition]::Manual
-$form.Location = New-Object System.Drawing.Point(($screen.Right - $form.Width - 16), ($screen.Bottom - $form.Height - 16))
-$label = New-Object System.Windows.Forms.Label
-$label.AutoSize = $false
-$label.Left = 16
-$label.Top = 16
-$label.Width = 372
-$label.Height = 145
-$label.Text = $env:GATEPILOT_POPUP_TEXT
-$label.Font = New-Object System.Drawing.Font("Segoe UI", 9)
-$form.Controls.Add($label)
-$script:decision = "reject"
-$script:payload = ""
-$approve = New-Object System.Windows.Forms.Button
-$approve.Text = "通过"
-$approve.Width = 92
-$approve.Height = 30
-$approve.Left = 96
-$approve.Top = 176
-$approve.Add_Click({ $script:decision = "approve"; $form.Close() })
-$form.Controls.Add($approve)
-$reject = New-Object System.Windows.Forms.Button
-$reject.Text = "拒绝"
-$reject.Width = 92
-$reject.Height = 30
-$reject.Left = 196
-$reject.Top = 176
-$reject.Add_Click({ $script:decision = "reject"; $form.Close() })
-$form.Controls.Add($reject)
-$reply = New-Object System.Windows.Forms.Button
-$reply.Text = "其他"
-$reply.Width = 92
-$reply.Height = 30
-$reply.Left = 296
-$reply.Top = 176
-$reply.Add_Click({
-  $text = [Microsoft.VisualBasic.Interaction]::InputBox("输入要回复给 CLI 的内容", "GatePilot Reply", "")
-  if ($text.Length -gt 0) { $script:decision = "reply"; $script:payload = $text; $form.Close() }
-})
-$form.Controls.Add($reply)
-$form.AcceptButton = $approve
-$form.CancelButton = $reject
-[void]$form.ShowDialog()
-[pscustomobject]@{ decision_type = $script:decision; payload = $script:payload } | ConvertTo-Json -Compress`
-	cmd := exec.Command("powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-STA", "-Command", script)
-	cmd.Env = append(os.Environ(), "GATEPILOT_POPUP_TEXT="+message)
-	output, err := cmd.CombinedOutput()
+	approved, err := nativeApprovalMessageBox("GatePilot Approval", message)
 	if err != nil {
-		return "", "", fmt.Errorf("%v: %s", err, strings.TrimSpace(string(output)))
-	}
-	var result struct {
-		DecisionType string `json:"decision_type"`
-		Payload      string `json:"payload"`
-	}
-	if err := json.Unmarshal(output, &result); err != nil {
 		return "", "", err
 	}
-	switch result.DecisionType {
-	case "approve", "reject", "reply":
-		return result.DecisionType, result.Payload, nil
-	default:
-		return "", "", fmt.Errorf("unexpected mini window result %q", result.DecisionType)
+	if approved {
+		return "approve", "", nil
 	}
+	return "reject", "", nil
 }
 
 func submitLocalApprovalDecision(serverURL string, approvalID string, clientInstanceID string, decisionType string, payload string) ([]byte, error) {

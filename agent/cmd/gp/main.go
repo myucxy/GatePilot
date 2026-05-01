@@ -443,15 +443,24 @@ func findLocalRuntimeCommand() (string, []string, error) {
 		return "", nil, err
 	}
 	selfDir := filepath.Dir(self)
-	desktopName := "gatepilot-agent-desktop"
+	desktopName := "GataPilot客户端"
+	previousDesktopName := "GatePilot客户端"
+	legacyDesktopName := "gatepilot-agent-desktop"
 	agentName := "gatepilot-agent"
 	if runtime.GOOS == "windows" {
 		desktopName += ".exe"
+		previousDesktopName += ".exe"
+		legacyDesktopName += ".exe"
 		agentName += ".exe"
 	}
 	desktopCandidates := []string{
 		filepath.Join(selfDir, desktopName),
 		filepath.Join(selfDir, "..", "gatepilot-agent-windows-amd64", desktopName),
+		filepath.Join(selfDir, "..", "gatepilot-client-windows-amd64", desktopName),
+		filepath.Join(selfDir, previousDesktopName),
+		filepath.Join(selfDir, "..", "gatepilot-client-windows-amd64", previousDesktopName),
+		filepath.Join(selfDir, legacyDesktopName),
+		filepath.Join(selfDir, "..", "gatepilot-agent-windows-amd64", legacyDesktopName),
 	}
 	for _, candidate := range desktopCandidates {
 		if _, err := os.Stat(candidate); err == nil {

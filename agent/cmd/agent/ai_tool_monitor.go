@@ -3,9 +3,7 @@ package main
 import (
 	"bufio"
 	"encoding/json"
-	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -314,71 +312,19 @@ func windowsInfoPopup(message string) error {
 	if runtime.GOOS != "windows" {
 		return nil
 	}
-	script := `$ErrorActionPreference = "Stop"
-Add-Type -AssemblyName System.Windows.Forms
-[System.Windows.Forms.MessageBox]::Show($env:GATEPILOT_POPUP_TEXT, "GatePilot 提醒", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null`
-	cmd := exec.Command("powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-STA", "-Command", script)
-	cmd.Env = append(os.Environ(), "GATEPILOT_POPUP_TEXT="+message)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("%v: %s", err, strings.TrimSpace(string(output)))
-	}
-	return nil
+	return nativeInfoMessageBox("GatePilot 提醒", message)
 }
 
 func windowsAIToolMonitorMiniWindow(message string) (string, error) {
 	if runtime.GOOS != "windows" {
 		return "", nil
 	}
-	script := `$ErrorActionPreference = "Stop"
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName System.Drawing
-$form = New-Object System.Windows.Forms.Form
-$form.Text = "GatePilot 提醒"
-$form.Width = 440
-$form.Height = 240
-$form.TopMost = $true
-$form.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedDialog
-$form.MaximizeBox = $false
-$form.MinimizeBox = $false
-$screen = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
-$form.StartPosition = [System.Windows.Forms.FormStartPosition]::Manual
-$form.Location = New-Object System.Drawing.Point(($screen.Right - $form.Width - 16), ($screen.Bottom - $form.Height - 16))
-$label = New-Object System.Windows.Forms.Label
-$label.AutoSize = $false
-$label.Left = 16
-$label.Top = 16
-$label.Width = 392
-$label.Height = 132
-$label.Text = $env:GATEPILOT_POPUP_TEXT
-$label.Font = New-Object System.Drawing.Font("Segoe UI", 9)
-$form.Controls.Add($label)
-$script:action = "ignore"
-$open = New-Object System.Windows.Forms.Button
-$open.Text = "打开客户端"
-$open.Width = 110
-$open.Height = 30
-$open.Left = 182
-$open.Top = 164
-$open.Add_Click({ $script:action = "open"; $form.Close() })
-$form.Controls.Add($open)
-$ignore = New-Object System.Windows.Forms.Button
-$ignore.Text = "忽略"
-$ignore.Width = 92
-$ignore.Height = 30
-$ignore.Left = 304
-$ignore.Top = 164
-$ignore.Add_Click({ $script:action = "ignore"; $form.Close() })
-$form.Controls.Add($ignore)
-$form.AcceptButton = $open
-$form.CancelButton = $ignore
-[void]$form.ShowDialog()
-$script:action`
-	cmd := exec.Command("powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-STA", "-Command", script)
-	cmd.Env = append(os.Environ(), "GATEPILOT_POPUP_TEXT="+message)
-	output, err := cmd.CombinedOutput()
+	open, err := nativeOpenClientMessageBox("GatePilot 提醒", message)
 	if err != nil {
-		return "", fmt.Errorf("%v: %s", err, strings.TrimSpace(string(output)))
+		return "", err
 	}
-	return strings.TrimSpace(string(output)), nil
+	if open {
+		return "open", nil
+	}
+	return "ignore", nil
 }

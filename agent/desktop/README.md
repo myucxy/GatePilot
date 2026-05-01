@@ -1,8 +1,8 @@
-# GatePilot Agent Desktop
+# GataPilot客户端
 
-Wails + React + TypeScript desktop shell for GatePilot Agent.
+Wails + React + TypeScript desktop client for GatePilot.
 
-The desktop app starts or connects to the local `gatepilot-agent.exe tray` process, then manages settings, login state, local history, and running-session replies through the local control API.
+The desktop client provides the local control API directly, then manages settings, login state, local history, approvals, and running-session replies.
 
 ## Development
 
