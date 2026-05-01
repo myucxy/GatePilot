@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/myucxy/gatepilot/agent/internal/adapter"
 )
 
 func TestTerminalTitleForCLI(t *testing.T) {
@@ -48,5 +50,31 @@ func TestConfiguredExecutableUsesSettings(t *testing.T) {
 	}
 	if got := configuredExecutable("codex"); got != `D:\Tools\codex.cmd` {
 		t.Fatalf("configured executable = %q", got)
+	}
+}
+
+func TestApprovalDetectorClearsPromptBufferAfterDecision(t *testing.T) {
+	detector := newInteractiveApprovalDetector("session", t.TempDir(), runOptions{CLIType: "codex"}, adapter.ForCLI("codex"))
+	detector.appendVisible("Codex needs permission to run command\nApprove or reject?\n")
+	detector.appendLines("Codex needs permission to run command\nApprove or reject?\n")
+	detector.pending = true
+
+	detector.finishApprovalPending(true)
+
+	if detector.pending {
+		t.Fatal("pending should be cleared")
+	}
+	if got := detector.visible.String(); got != "" {
+		t.Fatalf("visible buffer = %q, want empty", got)
+	}
+	if got := detector.currentLine(); got != "" {
+		t.Fatalf("current line = %q, want empty", got)
+	}
+	if events := detector.cliAdapter.Detect(adapter.TerminalSnapshot{
+		VisibleText: detector.visible.String(),
+		CursorLine:  detector.currentLine(),
+		RecentLines: detector.recentLines,
+	}); len(events) != 0 {
+		t.Fatalf("events after clearing prompt buffer = %+v, want none", events)
 	}
 }

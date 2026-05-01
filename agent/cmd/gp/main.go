@@ -285,7 +285,7 @@ func (d *interactiveApprovalDetector) handleApproval(event adapter.DetectedEvent
 		decisionType, payload, err = requestTrayDecision(approval, d.workingDir)
 	}
 	if err != nil {
-		d.finishApprovalPending()
+		d.finishApprovalPending(true)
 		return
 	}
 	decisionInput, err := d.cliAdapter.BuildDecisionInput(adapter.ApprovalEvent{
@@ -294,7 +294,7 @@ func (d *interactiveApprovalDetector) handleApproval(event adapter.DetectedEvent
 		ContextBefore: event.ContextBefore,
 	}, adapter.Decision{Type: decisionType, Payload: payload})
 	if err != nil {
-		d.finishApprovalPending()
+		d.finishApprovalPending(true)
 		return
 	}
 
@@ -309,7 +309,7 @@ func (d *interactiveApprovalDetector) handleApproval(event adapter.DetectedEvent
 	}
 	d.mu.Unlock()
 	if writer == nil || !d.cliAdapter.IsPromptStillActive(snapshot, adapter.ApprovalEvent{EventType: event.EventType, PromptText: event.PromptText, ContextBefore: event.ContextBefore}) {
-		d.finishApprovalPending()
+		d.finishApprovalPending(true)
 		return
 	}
 	n, writeErr := writer.Write(decisionInput)
@@ -339,13 +339,18 @@ func (d *interactiveApprovalDetector) handleApproval(event adapter.DetectedEvent
 		LastOutputSummary: "approval " + decisionType + " delivered",
 		PendingApprovals:  0,
 	})
-	d.finishApprovalPending()
+	d.finishApprovalPending(true)
 }
 
-func (d *interactiveApprovalDetector) finishApprovalPending() {
+func (d *interactiveApprovalDetector) finishApprovalPending(clearPromptBuffer bool) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.pending = false
+	if clearPromptBuffer {
+		d.visible.Reset()
+		d.lineBuffer.Reset()
+		d.recentLines = nil
+	}
 }
 
 type localApproval struct {

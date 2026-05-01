@@ -706,7 +706,7 @@ func (d *interactiveApprovalDetector) handleApproval(event adapter.DetectedEvent
 		}
 	}
 	if err != nil {
-		d.finishApprovalPending(event.PromptText)
+		d.finishApprovalPending(true)
 		return
 	}
 	decisionInput, err := d.cliAdapter.BuildDecisionInput(adapter.ApprovalEvent{
@@ -718,7 +718,7 @@ func (d *interactiveApprovalDetector) handleApproval(event adapter.DetectedEvent
 		Payload: payload,
 	})
 	if err != nil {
-		d.finishApprovalPending(event.PromptText)
+		d.finishApprovalPending(true)
 		return
 	}
 
@@ -733,7 +733,7 @@ func (d *interactiveApprovalDetector) handleApproval(event adapter.DetectedEvent
 	}
 	d.mu.Unlock()
 	if writer == nil || !d.cliAdapter.IsPromptStillActive(snapshot, adapter.ApprovalEvent{EventType: event.EventType, PromptText: event.PromptText, ContextBefore: event.ContextBefore}) {
-		d.finishApprovalPending(event.PromptText)
+		d.finishApprovalPending(true)
 		return
 	}
 	n, err := writer.Write(decisionInput)
@@ -763,13 +763,18 @@ func (d *interactiveApprovalDetector) handleApproval(event adapter.DetectedEvent
 		LastOutputSummary: "approval " + decisionType + " delivered",
 		PendingApprovals:  0,
 	})
-	d.finishApprovalPending(event.PromptText)
+	d.finishApprovalPending(true)
 }
 
-func (d *interactiveApprovalDetector) finishApprovalPending(prompt string) {
+func (d *interactiveApprovalDetector) finishApprovalPending(clearPromptBuffer bool) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.pending = false
+	if clearPromptBuffer {
+		d.visible.Reset()
+		d.lineBuffer.Reset()
+		d.recentLines = nil
+	}
 }
 
 func fallbackLocalApprovalDecision(approval localApproval) (string, string, error) {
