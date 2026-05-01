@@ -5,6 +5,7 @@ import "./styles.css";
 
 type Language = "zh" | "en";
 type ApprovalFilter = "all" | "pending" | "completed";
+type DevRole = "owner" | "admin" | "approver" | "viewer";
 type WSState = "idle" | "connecting" | "connected" | "closed";
 
 const tenantId = "00000000-0000-0000-0000-000000000100";
@@ -42,6 +43,11 @@ const copy = {
     requestFailed: "请求失败",
     roleInsufficient: "当前角色没有审批权限",
     alreadyDecided: "该审批已被处理，请刷新列表",
+    role: "Role",
+    readOnly: "Read-only",
+    details: "Details",
+    handledBy: "Handled by",
+    noSelection: "No approval selected",
     lanes: [
       { title: "服务端", status: "设备、会话、审批与多端同步", icon: Activity },
       { title: "Agent", status: "注册、长连接、fake CLI 托管", icon: Laptop },
@@ -80,6 +86,11 @@ const copy = {
     requestFailed: "Request failed",
     roleInsufficient: "Current role cannot submit approval decisions",
     alreadyDecided: "This approval was already decided. Refresh the list.",
+    role: "Role",
+    readOnly: "Read-only",
+    details: "Details",
+    handledBy: "Handled by",
+    noSelection: "No approval selected",
     lanes: [
       { title: "Server", status: "devices, sessions, approvals, sync", icon: Activity },
       { title: "Agent", status: "registration, websocket, fake CLI host", icon: Laptop },
@@ -118,6 +129,9 @@ type Approval = {
   delivery_id: string;
   delivery_status: string;
   decision_type: string;
+  decision_payload: string;
+  decided_by: Record<string, string>;
+  decided_at: string;
   created_at: string;
   expires_at: string;
 };
@@ -154,6 +168,8 @@ function App() {
 	const [approvals, setApprovals] = useState<Approval[]>([]);
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
   const [approvalFilter, setApprovalFilter] = useState<ApprovalFilter>("pending");
+  const [devRole, setDevRole] = useState<DevRole>("owner");
+  const [selectedApprovalID, setSelectedApprovalID] = useState<string>("");
   const [clientInstanceID, setClientInstanceID] = useState<string>("");
   const [wsState, setWSState] = useState<WSState>("idle");
 	const [submittingApprovals, setSubmittingApprovals] = useState<Set<string>>(new Set());
@@ -162,6 +178,8 @@ function App() {
 	const selectedSessionRef = useRef("");
 	const approvalFilterRef = useRef<ApprovalFilter>("pending");
 	const text = copy[language];
+	const canSubmitApprovals = devRole !== "viewer";
+	const selectedApproval = approvals.find((item) => item.approval_id === selectedApprovalID);
 
 	useEffect(() => {
 		selectedDeviceRef.current = selectedDeviceID;
@@ -329,7 +347,14 @@ function App() {
     const body = await response.json();
     const items = body.data.items as Approval[];
     const completedStatuses = new Set(["delivered", "delivery_failed", "expired", "cancelled_by_local_input"]);
-    setApprovals(filter === "completed" ? items.filter((item) => completedStatuses.has(item.status)) : items);
+    const visibleItems = filter === "completed" ? items.filter((item) => completedStatuses.has(item.status)) : items;
+    setApprovals(visibleItems);
+    setSelectedApprovalID((current) => {
+      if (current && visibleItems.some((item) => item.approval_id === current)) {
+        return current;
+      }
+      return visibleItems[0]?.approval_id ?? "";
+    });
   }
 
   async function refreshAuditLogs() {
@@ -357,7 +382,8 @@ function App() {
         headers: {
           "Content-Type": "application/json",
           "Idempotency-Key": crypto.randomUUID(),
-          "X-Client-Instance-Id": clientInstanceID
+          "X-Client-Instance-Id": clientInstanceID,
+          "X-Dev-Role": devRole
         },
         body: JSON.stringify({
           decision_type: decisionType,
@@ -366,6 +392,10 @@ function App() {
       });
       if (!response.ok) {
         setError(await responseErrorMessage(response, text));
+        if (response.status === 409) {
+          await refreshApprovals();
+          await refreshAuditLogs();
+        }
         return;
       }
       await refreshApprovals();
@@ -409,6 +439,15 @@ function App() {
               <Radio size={14} />
               {text.sync}: {wsState}
             </span>
+            <label className="roleSelect">
+              <span>{text.role}</span>
+              <select value={devRole} onChange={(event) => setDevRole(event.target.value as DevRole)}>
+                <option value="owner">owner</option>
+                <option value="admin">admin</option>
+                <option value="approver">approver</option>
+                <option value="viewer">viewer</option>
+              </select>
+            </label>
             <span className="pill">{text.schema}</span>
           </div>
         </header>
@@ -548,27 +587,71 @@ function App() {
               approvals.map((approval) => {
                 const isSubmitting = submittingApprovals.has(approval.approval_id);
                 return (
-                  <article className="approvalRow" key={approval.approval_id}>
+                  <article
+                    className={`approvalRow ${selectedApprovalID === approval.approval_id ? "selected" : ""}`}
+                    key={approval.approval_id}
+                    onClick={() => setSelectedApprovalID(approval.approval_id)}
+                  >
                     <div>
                       <strong>{approval.prompt_text}</strong>
-                      <p>{approval.cli_type} / {approval.risk_level} / {approval.status}</p>
+                      <p>
+                        {approval.cli_type} / {approval.risk_level} /{" "}
+                        <span className={`statusBadge status-${approval.status}`}>{approval.status}</span>
+                      </p>
                     </div>
-                    {approval.status === "waiting_decision" ? (
+                    {approval.status === "waiting_decision" && canSubmitApprovals ? (
                       <div className="toolActions">
-                        <button disabled={isSubmitting} onClick={() => decideApproval(approval.approval_id, "approve")}>
+                        <button disabled={isSubmitting} onClick={(event) => {
+                          event.stopPropagation();
+                          decideApproval(approval.approval_id, "approve");
+                        }}>
                           {isSubmitting ? text.submitting : text.approve}
                         </button>
-                        <button disabled={isSubmitting} onClick={() => decideApproval(approval.approval_id, "reject")}>
+                        <button disabled={isSubmitting} onClick={(event) => {
+                          event.stopPropagation();
+                          decideApproval(approval.approval_id, "reject");
+                        }}>
                           {text.reject}
                         </button>
-                        <button disabled={isSubmitting} onClick={() => decideApproval(approval.approval_id, "reply")}>
+                        <button disabled={isSubmitting} onClick={(event) => {
+                          event.stopPropagation();
+                          decideApproval(approval.approval_id, "reply");
+                        }}>
                           {text.reply}
                         </button>
                       </div>
+                    ) : approval.status === "waiting_decision" ? (
+                      <span className="readOnlyText">{text.readOnly}</span>
                     ) : null}
                   </article>
                 );
               })
+            )}
+          </div>
+          <div className="approvalDetail">
+            {selectedApproval ? (
+              <>
+                <div>
+                  <strong>{text.details}</strong>
+                  <p>{shortID(selectedApproval.approval_id)} / {selectedApproval.status} / {selectedApproval.delivery_status}</p>
+                </div>
+                <div className="detailGrid">
+                  <span>Session</span>
+                  <strong>{shortID(selectedApproval.session_id)}</strong>
+                  <span>Created</span>
+                  <strong>{formatDate(selectedApproval.created_at)}</strong>
+                  <span>Expires</span>
+                  <strong>{formatDate(selectedApproval.expires_at)}</strong>
+                  <span>Decision</span>
+                  <strong>{selectedApproval.decision_type || "-"}</strong>
+                  <span>{text.handledBy}</span>
+                  <strong>{approvalActor(selectedApproval)}</strong>
+                  <span>Payload</span>
+                  <strong>{selectedApproval.decision_payload || "-"}</strong>
+                </div>
+              </>
+            ) : (
+              <p>{text.noSelection}</p>
             )}
           </div>
         </section>
@@ -618,6 +701,15 @@ function browserDisplayName() {
 
 function shortID(value: string) {
   return value ? value.slice(0, 8) : "";
+}
+
+function formatDate(value: string) {
+  return value ? new Date(value).toLocaleString() : "-";
+}
+
+function approvalActor(approval: Approval) {
+  const actor = approval.decided_by || {};
+  return actor.display_name || actor.actor_type || "-";
 }
 
 async function responseErrorMessage(response: Response, text: typeof copy.zh) {
