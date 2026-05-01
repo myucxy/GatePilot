@@ -428,6 +428,16 @@ func TestTraySessionHistoryEndpoints(t *testing.T) {
 	if detailResp.StatusCode != http.StatusOK {
 		t.Fatalf("detail status = %d, want 200", detailResp.StatusCode)
 	}
+
+	uiResp, err := http.Get(server.URL + "/ui/history")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer uiResp.Body.Close()
+	uiBody, _ := io.ReadAll(uiResp.Body)
+	if uiResp.StatusCode != http.StatusOK || !strings.Contains(string(uiBody), "GatePilot Agent History") {
+		t.Fatalf("history UI status=%d body=%q, want HTML history page", uiResp.StatusCode, string(uiBody))
+	}
 }
 
 func TestSendLocalSessionInputWritesToActiveHost(t *testing.T) {

@@ -83,6 +83,8 @@ func main() {
 		replyLocalSession(os.Args[2:])
 	case "settings":
 		configureAgentSettings(os.Args[2:])
+	case "open-history":
+		openLocalHistoryUI()
 	case "status":
 		printAgentStatus()
 	case "login":
@@ -951,6 +953,17 @@ func startTrayHTTPServer(state *trayState) (*http.Server, error) {
 
 func newTrayHTTPHandler(state *trayState) http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("/ui", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/ui/history", http.StatusFound)
+	})
+	mux.HandleFunc("/ui/history", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte(localHistoryHTML()))
+	})
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		writeTrayJSON(w, map[string]any{"status": "ok", "mode": state.currentSettings().Mode})
 	})
@@ -1186,6 +1199,7 @@ func setupTrayMenu(state *trayState) {
 	toggleNotify := systray.AddMenuItem("关闭提醒", "Toggle local approval notifications")
 	toggleOffline := systray.AddMenuItem("切换离线/在线模式", "Toggle offline mode when login settings are present")
 	toggleStartup := systray.AddMenuItem("开启开机启动", "Toggle Windows start on login")
+	openHistoryItem := systray.AddMenuItem("打开会话历史", "Open local session history")
 	historyItem := systray.AddMenuItem("显示历史路径", "Print local history path")
 	settingsItem := systray.AddMenuItem("显示设置路径", "Print settings path")
 	loginItem := systray.AddMenuItem("登录/切换账号", "Print login command help")
@@ -1258,6 +1272,13 @@ func setupTrayMenu(state *trayState) {
 				state.setSettings(settings)
 			}
 			refresh()
+		}
+	}()
+	go func() {
+		for range openHistoryItem.ClickedCh {
+			if err := openBrowser("http://" + trayListenAddress() + "/ui/history"); err != nil {
+				fmt.Fprintf(os.Stderr, "open history failed: %v\n", err)
+			}
 		}
 	}()
 	go func() {
@@ -1382,6 +1403,93 @@ func writeTrayJSON(w http.ResponseWriter, value any) {
 	_ = json.NewEncoder(w).Encode(value)
 }
 
+func localHistoryHTML() string {
+	return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GatePilot Agent History</title>
+<style>
+:root{color-scheme:light dark;font-family:Segoe UI,Arial,sans-serif;background:#f7f8fa;color:#1b1f24}
+body{margin:0}
+header{height:56px;display:flex;align-items:center;gap:14px;padding:0 18px;border-bottom:1px solid #d8dee4;background:#fff}
+h1{font-size:18px;font-weight:650;margin:0}
+main{display:grid;grid-template-columns:360px 1fr;min-height:calc(100vh - 57px)}
+.list{border-right:1px solid #d8dee4;background:#fff;overflow:auto}
+.filters{display:grid;grid-template-columns:1fr 1fr 72px;gap:8px;padding:12px;border-bottom:1px solid #d8dee4}
+input,select,button,textarea{font:inherit;border:1px solid #c8d0d9;border-radius:6px;background:#fff;color:#1b1f24}
+input,select{height:34px;padding:0 8px}
+button{height:34px;padding:0 12px;cursor:pointer}
+button.primary{background:#116329;color:#fff;border-color:#116329}
+.session{display:block;width:100%;height:auto;text-align:left;border:0;border-bottom:1px solid #eef1f4;border-radius:0;padding:12px;background:#fff}
+.session:hover,.session.active{background:#eef6ff}
+.session strong{display:block;font-size:13px;margin-bottom:4px}
+.meta{font-size:12px;color:#57606a;line-height:1.45;word-break:break-all}
+.detail{padding:18px;overflow:auto}
+.panel{border:1px solid #d8dee4;border-radius:8px;background:#fff;margin-bottom:14px}
+.panel h2{font-size:14px;margin:0;padding:12px 14px;border-bottom:1px solid #eef1f4}
+.panel .body{padding:12px 14px}
+.grid{display:grid;grid-template-columns:160px 1fr;gap:8px;font-size:13px}
+pre{white-space:pre-wrap;word-break:break-word;margin:0;font-size:12px;line-height:1.5}
+.timeline{display:grid;gap:10px}
+.item{border:1px solid #eef1f4;border-radius:6px;padding:10px}
+.reply{display:flex;gap:8px;margin-top:12px}
+.reply input{flex:1}
+.empty{padding:24px;color:#57606a}
+@media (max-width:800px){main{grid-template-columns:1fr}.list{border-right:0;border-bottom:1px solid #d8dee4;max-height:42vh}.filters{grid-template-columns:1fr 1fr}.filters button{grid-column:1 / -1}.grid{grid-template-columns:1fr}}
+@media (prefers-color-scheme:dark){:root{background:#0d1117;color:#e6edf3}header,.list,.panel,.session,input,select,button,textarea{background:#161b22;color:#e6edf3;border-color:#30363d}.session{border-bottom-color:#30363d}.session:hover,.session.active{background:#1f2a36}.meta,.empty{color:#8b949e}.panel h2{border-bottom-color:#30363d}.item{border-color:#30363d}.primary{background:#238636!important;border-color:#238636!important}}
+</style>
+</head>
+<body>
+<header><h1>GatePilot Agent History</h1><span id="status" class="meta"></span></header>
+<main>
+<section class="list">
+<div class="filters">
+<select id="cli"><option value="">All CLI</option><option>custom</option><option>codex</option><option>claude</option><option>gemini</option><option>copilot</option><option>opencode</option></select>
+<select id="state"><option value="">All status</option><option>running</option><option>waiting_approval</option><option>completed</option><option>failed</option><option>lost</option></select>
+<button id="refresh">Refresh</button>
+</div>
+<div id="sessions" class="empty">Loading...</div>
+</section>
+<section class="detail" id="detail"><div class="empty">Select a session.</div></section>
+</main>
+<script>
+const sessionsEl=document.getElementById('sessions');
+const detailEl=document.getElementById('detail');
+let selected='';
+function text(value){return value===undefined||value===null||value===''?'-':String(value)}
+function node(tag,cls,value){const el=document.createElement(tag);if(cls)el.className=cls;if(value!==undefined)el.textContent=value;return el}
+async function loadStatus(){const r=await fetch('/api/local/status');const j=await r.json();document.getElementById('status').textContent=j.data.offline?'offline local':'online configured'}
+async function loadSessions(){
+ const params=new URLSearchParams();const cli=document.getElementById('cli').value;const state=document.getElementById('state').value;
+ if(cli)params.set('cli_type',cli);if(state)params.set('status',state);params.set('limit','100');
+ const r=await fetch('/api/local/sessions?'+params.toString());const j=await r.json();sessionsEl.innerHTML='';
+ const items=j.data.items||[];if(!items.length){sessionsEl.className='empty';sessionsEl.textContent='No sessions.';return}
+ sessionsEl.className='';
+ for(const s of items){const b=node('button','session'+(s.session_id===selected?' active':''));b.onclick=()=>loadDetail(s.session_id);
+  b.appendChild(node('strong','',s.session_id));b.appendChild(node('div','meta',s.cli_type+' / '+s.status+' / approvals '+s.pending_approval_count));
+  b.appendChild(node('div','meta',s.working_dir||s.command_line_redacted||''));sessionsEl.appendChild(b)}
+}
+function panel(title,body){const p=node('div','panel');p.appendChild(node('h2','',title));const b=node('div','body');b.appendChild(body);p.appendChild(b);return p}
+function kv(data){const g=node('div','grid');for(const [k,v] of Object.entries(data)){g.appendChild(node('div','meta',k));g.appendChild(node('div','',text(v)))}return g}
+function timeline(items,kind){const box=node('div','timeline');if(!items.length){box.appendChild(node('div','meta','No '+kind+'.'));return box}
+ for(const item of items){const x=node('div','item');const pre=node('pre','',JSON.stringify(item,null,2));x.appendChild(pre);box.appendChild(x)}return box}
+async function loadDetail(id){
+ selected=id;await loadSessions();const r=await fetch('/api/local/sessions/'+encodeURIComponent(id));const j=await r.json();const d=j.data;detailEl.innerHTML='';
+ const s=d.session;detailEl.appendChild(panel('Session',kv({session_id:s.session_id,cli_type:s.cli_type,status:s.status,working_dir:s.working_dir,started_at:s.started_at,ended_at:s.ended_at,last_output_summary:s.last_output_summary})));
+ const canReply=s.status==='running'||s.status==='waiting_approval';if(canReply){const wrap=node('div','');const row=node('div','reply');const input=node('input','');input.placeholder='Reply text';const send=node('button','primary','Send');send.onclick=async()=>{if(!input.value.trim())return;await fetch('/api/local/sessions/'+encodeURIComponent(id)+'/input',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:input.value})});input.value='';await loadDetail(id)};row.appendChild(input);row.appendChild(send);wrap.appendChild(row);detailEl.appendChild(panel('Reply',wrap))}
+ detailEl.appendChild(panel('Output',timeline(d.output||[],'output')));
+ detailEl.appendChild(panel('Approvals',timeline(d.approvals||[],'approvals')));
+ detailEl.appendChild(panel('Decisions',timeline(d.decisions||[],'decisions')));
+}
+document.getElementById('refresh').onclick=loadSessions;document.getElementById('cli').onchange=loadSessions;document.getElementById('state').onchange=loadSessions;
+loadStatus();loadSessions();
+</script>
+</body>
+</html>`
+}
+
 func intQueryParam(r *http.Request, key string) int {
 	value := strings.TrimSpace(r.URL.Query().Get(key))
 	if value == "" {
@@ -1479,6 +1587,28 @@ func replyLocalSession(args []string) {
 		"type":       "agent.reply_sent",
 		"session_id": sessionID,
 	}))
+}
+
+func openLocalHistoryUI() {
+	target := "http://" + trayListenAddress() + "/ui/history"
+	if err := openBrowser(target); err != nil {
+		fmt.Fprintf(os.Stderr, "open history failed: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Println(mustJSON(map[string]any{
+		"type": "agent.history_opened",
+		"url":  target,
+	}))
+}
+
+func openBrowser(target string) error {
+	if runtime.GOOS == "windows" {
+		return exec.Command("rundll32.exe", "url.dll,FileProtocolHandler", target).Start()
+	}
+	if runtime.GOOS == "darwin" {
+		return exec.Command("open", target).Start()
+	}
+	return exec.Command("xdg-open", target).Start()
 }
 
 type localSessionHost struct {
