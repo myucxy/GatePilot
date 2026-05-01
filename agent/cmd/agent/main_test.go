@@ -215,6 +215,27 @@ func TestManagedCLICommandUsesRealCommandExceptFake(t *testing.T) {
 	}
 }
 
+func TestTerminalPassthroughForTTYBasedTools(t *testing.T) {
+	if !shouldUseTerminalPassthrough(runCLIOptions{CLIType: "codex", CommandArgs: []string{"codex"}}) {
+		t.Fatal("codex should use terminal passthrough")
+	}
+	if !shouldUseTerminalPassthrough(runCLIOptions{CLIType: "claude_code", CommandArgs: []string{"claude"}}) {
+		t.Fatal("claude should use terminal passthrough")
+	}
+	if shouldUseTerminalPassthrough(runCLIOptions{CLIType: "custom", CommandArgs: []string{"fake-ai-cli"}}) {
+		t.Fatal("fake CLI should keep pipe mode for tests")
+	}
+}
+
+func TestAIToolTypeForCLI(t *testing.T) {
+	if got := aiToolTypeForCLI("claude-code"); got != "claude" {
+		t.Fatalf("ai tool type = %q, want claude", got)
+	}
+	if got := aiToolTypeForCLI("codex"); got != "codex" {
+		t.Fatalf("ai tool type = %q, want codex", got)
+	}
+}
+
 func TestLocalDecisionInputUsesPopupDecisionOverride(t *testing.T) {
 	t.Setenv("GATEPILOT_AGENT_POPUP_DECISION", "reject")
 	var output bytes.Buffer

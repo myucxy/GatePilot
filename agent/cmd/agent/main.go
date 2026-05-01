@@ -120,6 +120,10 @@ func main() {
 func runManagedCLI(args []string) {
 	options := parseRunCLIOptions(args)
 	options.CLIType = adapter.NormalizeCLIType(options.CLIType)
+	if shouldUseTerminalPassthrough(options) {
+		runTerminalPassthroughCLI(options)
+		return
+	}
 	cliAdapter := adapter.ForCLI(options.CLIType)
 	localSessionID := "local_session_" + fmt.Sprintf("%d", time.Now().UnixNano())
 
@@ -432,6 +436,135 @@ func runAIToolShortcut(toolType string, args []string) {
 	runArgs := []string{"--local-only", "--cli-type", cliType, "--", executable}
 	runArgs = append(runArgs, args...)
 	runManagedCLI(runArgs)
+}
+
+func shouldUseTerminalPassthrough(options runCLIOptions) bool {
+	if len(options.CommandArgs) == 0 || isFakeCLICommand(options.CommandArgs[0]) {
+		return false
+	}
+	switch adapter.NormalizeCLIType(options.CLIType) {
+	case "codex", "claude_code":
+		return true
+	default:
+		return false
+	}
+}
+
+func runTerminalPassthroughCLI(options runCLIOptions) {
+	if len(options.CommandArgs) == 0 {
+		fmt.Fprintln(os.Stderr, "missing command")
+		os.Exit(2)
+	}
+	toolType := aiToolTypeForCLI(options.CLIType)
+	if toolType != "" {
+		if err := ensureAIToolConfigured(toolType, options.CommandArgs[0]); err != nil {
+			fmt.Fprintf(os.Stderr, "GatePilot 设置提示: %v\n", err)
+		}
+	}
+	ensureTrayRunning()
+
+	localSessionID := "local_session_" + fmt.Sprintf("%d", time.Now().UnixNano())
+	wd := currentWorkingDir()
+	_ = upsertLocalSession(localSessionRecord{
+		SessionID:           localSessionID,
+		CLIType:             options.CLIType,
+		CommandLineRedacted: options.CommandLine,
+		WorkingDir:          wd,
+		WorkingDirHash:      "sha256:" + sha256String(wd),
+		Status:              "running",
+		StartedAt:           time.Now().UTC().Format(time.RFC3339),
+		LastOutputSummary:   "本地 AI CLI 已启动",
+	})
+
+	cmd := exec.Command(options.CommandArgs[0], options.CommandArgs[1:]...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Dir = wd
+	err := cmd.Run()
+	exitStatus := "completed"
+	summary := "本地 AI CLI 已结束"
+	exitCode := 0
+	if err != nil {
+		exitStatus = "failed"
+		summary = err.Error()
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			exitCode = exitErr.ExitCode()
+		} else {
+			exitCode = 1
+		}
+	}
+	_ = upsertLocalSession(localSessionRecord{
+		SessionID:         localSessionID,
+		Status:            exitStatus,
+		EndedAt:           time.Now().UTC().Format(time.RFC3339),
+		LastOutputSummary: summary,
+		PendingApprovals:  0,
+	})
+	if err != nil {
+		os.Exit(exitCode)
+	}
+}
+
+func aiToolTypeForCLI(cliType string) string {
+	switch adapter.NormalizeCLIType(cliType) {
+	case "codex":
+		return "codex"
+	case "claude_code":
+		return "claude"
+	default:
+		return ""
+	}
+}
+
+func ensureAIToolConfigured(toolType string, executable string) error {
+	settings, err := loadAgentLocalSettings()
+	if err != nil {
+		return err
+	}
+	for _, cfg := range configuredAITools(settings) {
+		if cfg.ToolType == toolType {
+			return nil
+		}
+	}
+	for _, cfg := range defaultAIToolConfigs() {
+		if cfg.ToolType == toolType {
+			cfg.ExecutablePath = executable
+			settings.AITools = append(settings.AITools, cfg)
+			return saveAgentLocalSettingsWithStartup(settings)
+		}
+	}
+	return nil
+}
+
+func ensureTrayRunning() {
+	client := http.Client{Timeout: 500 * time.Millisecond}
+	resp, err := client.Get("http://" + trayListenAddress() + "/healthz")
+	if err == nil {
+		_ = resp.Body.Close()
+		if resp.StatusCode == http.StatusOK {
+			return
+		}
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return
+	}
+	cmd := exec.Command(exe, "tray")
+	applyHiddenWindow(cmd)
+	if err := cmd.Start(); err != nil {
+		return
+	}
+	for i := 0; i < 20; i++ {
+		time.Sleep(150 * time.Millisecond)
+		resp, err := client.Get("http://" + trayListenAddress() + "/healthz")
+		if err == nil {
+			_ = resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				return
+			}
+		}
+	}
 }
 
 func installGPCommand(args []string) {
