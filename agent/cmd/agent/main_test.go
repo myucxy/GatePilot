@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -176,6 +177,39 @@ func TestLocalDecisionInputRejectsUnsupportedDecision(t *testing.T) {
 	_, _, err := localDecisionInput(localUIOptions{DecisionType: "maybe"}, strings.NewReader(""), io.Discard)
 	if err == nil {
 		t.Fatal("expected unsupported decision error")
+	}
+}
+
+func TestParseRunCLIOptionsSupportsLocalOnly(t *testing.T) {
+	options := parseRunCLIOptions([]string{
+		"--local-only",
+		"--decision", "reject",
+		"--payload", "no",
+		"--cli-type", "codex",
+		"--", "codex",
+	})
+	if !options.LocalOnly || options.Decision != "reject" || options.Payload != "no" || options.CLIType != "codex" || options.CommandLine != "codex" {
+		t.Fatalf("options = %+v, want local-only codex reject", options)
+	}
+}
+
+func TestConfirmLocalApprovalWritesDecisionInput(t *testing.T) {
+	var decisionSink bytes.Buffer
+	var output bytes.Buffer
+	ackResult, bytesWritten, err := confirmLocalApproval(&decisionSink, adapter.ForCLI("custom"), adapter.DetectedEvent{
+		EventType:     "permission_request",
+		RiskLevel:     "high",
+		PromptText:    "allow command?",
+		ContextBefore: "context",
+	}, localUIOptions{DecisionType: "approve"}, strings.NewReader(""), &output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ackResult != "written" || bytesWritten == 0 || strings.TrimSpace(decisionSink.String()) != "approve" {
+		t.Fatalf("ack=%q bytes=%d decision=%q, want approve written", ackResult, bytesWritten, decisionSink.String())
+	}
+	if !strings.Contains(output.String(), "local_ui.approval_notification") || !strings.Contains(output.String(), "local_only.decision_written") {
+		t.Fatalf("output = %q, want local notification and decision written events", output.String())
 	}
 }
 

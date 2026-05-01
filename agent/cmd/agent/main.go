@@ -36,6 +36,14 @@ type agentConfig struct {
 
 var deliveryDecisionWriter io.Writer = io.Discard
 
+type runCLIOptions struct {
+	CLIType     string
+	CommandLine string
+	LocalOnly   bool
+	Decision    string
+	Payload     string
+}
+
 func main() {
 	command := "version"
 	if len(os.Args) > 1 {
@@ -73,30 +81,9 @@ func main() {
 }
 
 func runManagedCLI(args []string) {
-	config, err := loadAgentConfig()
-	if err != nil || config.DeviceID == "" {
-		fmt.Fprintln(os.Stderr, "agent is not registered; run register first or set GATEPILOT_AGENT_CONFIG")
-		os.Exit(2)
-	}
-
-	cliType := "custom"
-	commandLine := "gatepilot fake"
-	for i := 0; i < len(args); i++ {
-		switch args[i] {
-		case "--cli-type":
-			if i+1 < len(args) {
-				cliType = args[i+1]
-				i++
-			}
-		case "--":
-			if i+1 < len(args) {
-				commandLine = strings.Join(args[i+1:], " ")
-			}
-			i = len(args)
-		}
-	}
-	cliType = adapter.NormalizeCLIType(cliType)
-	cliAdapter := adapter.ForCLI(cliType)
+	options := parseRunCLIOptions(args)
+	options.CLIType = adapter.NormalizeCLIType(options.CLIType)
+	cliAdapter := adapter.ForCLI(options.CLIType)
 
 	cmd := exec.Command(os.Args[0], "run-fake")
 	stdout, err := cmd.StdoutPipe()
@@ -114,17 +101,49 @@ func runManagedCLI(args []string) {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	event, outputText, err := detectApprovalFromReader(stdout, cliAdapter)
+	event, outputText, remainingStdout, err := detectApprovalFromReaderWithRemainder(stdout, cliAdapter)
 	if err != nil {
 		_ = cmd.Process.Kill()
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+	if options.LocalOnly {
+		ackResult, bytesWritten, err := confirmLocalApproval(stdin, cliAdapter, event, localUIOptions{
+			DecisionType: options.Decision,
+			Payload:      options.Payload,
+		}, os.Stdin, os.Stdout)
+		_ = stdin.Close()
+		if err != nil {
+			_ = cmd.Process.Kill()
+			fmt.Fprintf(os.Stderr, "local confirmation failed: %v\n", err)
+			os.Exit(1)
+		}
+		if remainingOutput, readErr := io.ReadAll(remainingStdout); readErr == nil && len(remainingOutput) > 0 {
+			fmt.Print(string(remainingOutput))
+		}
+		if err := cmd.Wait(); err != nil {
+			fmt.Fprintf(os.Stderr, "local CLI exited after decision: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println(mustJSON(map[string]any{
+			"type":          "local_only.completed",
+			"ack_result":    ackResult,
+			"bytes_written": bytesWritten,
+		}))
+		return
+	}
+
+	config, err := loadAgentConfig()
+	if err != nil || config.DeviceID == "" {
+		_ = cmd.Process.Kill()
+		fmt.Fprintln(os.Stderr, "agent is not registered; run register first or set GATEPILOT_AGENT_CONFIG")
+		os.Exit(2)
+	}
 
 	sessionBody := mustMarshal(map[string]any{
 		"device_id":             config.DeviceID,
-		"cli_type":              cliType,
-		"command_line_redacted": commandLine,
+		"cli_type":              options.CLIType,
+		"command_line_redacted": options.CommandLine,
 		"working_dir_hash":      "sha256:local",
 		"last_output_summary":   "fake CLI session started",
 	})
@@ -143,12 +162,12 @@ func runManagedCLI(args []string) {
 		EventID:          "evt_" + fmt.Sprintf("%d", time.Now().UnixNano()),
 		DeviceID:         config.DeviceID,
 		SessionID:        sessionID,
-		CLIType:          cliType,
+		CLIType:          options.CLIType,
 		EventType:        event.EventType,
 		RiskLevel:        event.RiskLevel,
 		PromptText:       event.PromptText,
 		ContextBefore:    event.ContextBefore,
-		IdempotencyKey:   approvalIdempotencyKey(config.DeviceID, sessionID, cliType, event.PromptText, event.ContextBefore),
+		IdempotencyKey:   approvalIdempotencyKey(config.DeviceID, sessionID, options.CLIType, event.PromptText, event.ContextBefore),
 		SuggestedActions: event.SuggestedActions,
 		ExpiresInSeconds: 300,
 		CreatedAt:        time.Now().UTC(),
@@ -189,13 +208,99 @@ func runManagedCLI(args []string) {
 	}
 }
 
+func parseRunCLIOptions(args []string) runCLIOptions {
+	options := runCLIOptions{
+		CLIType:     "custom",
+		CommandLine: "gatepilot fake",
+	}
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--cli-type":
+			if i+1 < len(args) {
+				options.CLIType = args[i+1]
+				i++
+			}
+		case "--local-only":
+			options.LocalOnly = true
+		case "--decision":
+			if i+1 < len(args) {
+				options.Decision = args[i+1]
+				i++
+			}
+		case "--payload":
+			if i+1 < len(args) {
+				options.Payload = args[i+1]
+				i++
+			}
+		case "--":
+			if i+1 < len(args) {
+				options.CommandLine = strings.Join(args[i+1:], " ")
+			}
+			i = len(args)
+		}
+	}
+	return options
+}
+
+func confirmLocalApproval(writer io.Writer, cliAdapter adapter.CLIAdapter, event adapter.DetectedEvent, options localUIOptions, reader io.Reader, output io.Writer) (string, int, error) {
+	notifyLocalApproval(output, localApproval{
+		ApprovalID:    "local",
+		TenantID:      "local",
+		DeviceID:      hostname(),
+		SessionID:     "local",
+		CLIType:       cliAdapter.Type(),
+		EventType:     event.EventType,
+		RiskLevel:     event.RiskLevel,
+		PromptText:    event.PromptText,
+		ContextBefore: event.ContextBefore,
+		ExpiresAt:     time.Now().UTC().Add(5 * time.Minute).Format(time.RFC3339),
+	})
+	decisionType, payload, err := localDecisionInput(options, reader, output)
+	if err != nil {
+		return "write_failed", 0, err
+	}
+	decisionInput, err := cliAdapter.BuildDecisionInput(adapter.ApprovalEvent{
+		EventType:     event.EventType,
+		PromptText:    event.PromptText,
+		ContextBefore: event.ContextBefore,
+	}, adapter.Decision{
+		Type:    decisionType,
+		Payload: payload,
+	})
+	if err != nil {
+		return "write_failed", 0, err
+	}
+	n, err := writer.Write(decisionInput)
+	if err != nil {
+		return "write_failed", n, err
+	}
+	fmt.Fprintln(output, mustJSON(map[string]any{
+		"type":          "local_only.decision_written",
+		"decision_type": decisionType,
+		"bytes_written": n,
+	}))
+	return "written", n, nil
+}
+
 func detectApprovalFromReader(reader io.Reader, cliAdapter adapter.CLIAdapter) (adapter.DetectedEvent, string, error) {
-	scanner := bufio.NewScanner(reader)
+	event, output, _, err := detectApprovalFromReaderWithRemainder(reader, cliAdapter)
+	return event, output, err
+}
+
+func detectApprovalFromReaderWithRemainder(reader io.Reader, cliAdapter adapter.CLIAdapter) (adapter.DetectedEvent, string, io.Reader, error) {
+	buffered := bufio.NewReader(reader)
 	recentLines := []string{}
 	var visible strings.Builder
 	sequence := int64(0)
-	for scanner.Scan() {
-		line := scanner.Text()
+	for {
+		rawLine, err := buffered.ReadString('\n')
+		if err != nil && rawLine == "" {
+			if err == io.EOF {
+				return adapter.DetectedEvent{}, visible.String(), buffered, fmt.Errorf("managed CLI prompt was not detected")
+			}
+			return adapter.DetectedEvent{}, visible.String(), buffered, err
+		}
+		line := strings.TrimRight(rawLine, "\r\n")
 		fmt.Println(line)
 		if visible.Len() > 0 {
 			visible.WriteString("\n")
@@ -213,13 +318,12 @@ func detectApprovalFromReader(reader io.Reader, cliAdapter adapter.CLIAdapter) (
 			RecentLines: recentLines,
 		})
 		if len(events) > 0 {
-			return events[0], visible.String(), nil
+			return events[0], visible.String(), buffered, nil
+		}
+		if err == io.EOF {
+			return adapter.DetectedEvent{}, visible.String(), buffered, fmt.Errorf("managed CLI prompt was not detected")
 		}
 	}
-	if err := scanner.Err(); err != nil {
-		return adapter.DetectedEvent{}, visible.String(), err
-	}
-	return adapter.DetectedEvent{}, visible.String(), fmt.Errorf("managed CLI prompt was not detected")
 }
 
 func flushQueue(args []string) {
