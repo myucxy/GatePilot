@@ -3,12 +3,14 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/myucxy/gatepilot/agent/internal/adapter"
 	"github.com/myucxy/gatepilot/agent/internal/localqueue"
@@ -233,6 +235,18 @@ func TestAIToolTypeForCLI(t *testing.T) {
 	}
 	if got := aiToolTypeForCLI("codex"); got != "codex" {
 		t.Fatalf("ai tool type = %q, want codex", got)
+	}
+}
+
+func TestConPTYFallbackOnlyForImmediateDLLInitFailure(t *testing.T) {
+	if !shouldFallbackToPlainTerminal(int(int32(-1073741502)), fmt.Errorf("failed"), time.Now()) {
+		t.Fatal("expected immediate DLL init failure to fall back")
+	}
+	if shouldFallbackToPlainTerminal(1, fmt.Errorf("failed"), time.Now()) {
+		t.Fatal("generic command failure should not fall back")
+	}
+	if shouldFallbackToPlainTerminal(int(int32(-1073741502)), fmt.Errorf("failed"), time.Now().Add(-5*time.Second)) {
+		t.Fatal("late DLL init failure should not fall back")
 	}
 }
 

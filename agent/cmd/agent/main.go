@@ -455,6 +455,7 @@ func runTerminalPassthroughCLI(options runCLIOptions) {
 		fmt.Fprintln(os.Stderr, "missing command")
 		os.Exit(2)
 	}
+	options.CLIType = adapter.NormalizeCLIType(options.CLIType)
 	toolType := aiToolTypeForCLI(options.CLIType)
 	if toolType != "" {
 		if err := ensureAIToolConfigured(toolType, options.CommandArgs[0]); err != nil {
@@ -465,6 +466,22 @@ func runTerminalPassthroughCLI(options runCLIOptions) {
 
 	localSessionID := "local_session_" + fmt.Sprintf("%d", time.Now().UnixNano())
 	wd := currentWorkingDir()
+	cliAdapter := adapter.ForCLI(options.CLIType)
+	detector := newInteractiveApprovalDetector(localSessionID, wd, options, cliAdapter)
+	command, err := startInteractiveCommand(interactiveCommandOptions{
+		Args:     options.CommandArgs,
+		Dir:      wd,
+		OnOutput: detector.onOutput,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "start ConPTY failed: %v\n", err)
+		os.Exit(1)
+	}
+	detector.setWriter(command.Input)
+	localHost, err := startLocalSessionHost(localSessionID, command.Input)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "local session control warning: %v\n", err)
+	}
 	_ = upsertLocalSession(localSessionRecord{
 		SessionID:           localSessionID,
 		CLIType:             options.CLIType,
@@ -474,23 +491,24 @@ func runTerminalPassthroughCLI(options runCLIOptions) {
 		Status:              "running",
 		StartedAt:           time.Now().UTC().Format(time.RFC3339),
 		LastOutputSummary:   "本地 AI CLI 已启动",
+		ControlAddr:         localHostAddress(localHost),
 	})
 
-	cmd := exec.Command(options.CommandArgs[0], options.CommandArgs[1:]...)
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	cmd.Dir = wd
-	err := cmd.Run()
+	startedAt := time.Now()
+	exitCode, err := command.Wait()
+	if shouldFallbackToPlainTerminal(exitCode, err, startedAt) {
+		fmt.Fprintln(os.Stderr, "GatePilot ConPTY 不可用，已回退到终端直连模式。")
+		exitCode, err = runPlainTerminalPassthrough(options, wd)
+	}
+	if localHost != nil {
+		_ = localHost.Close()
+	}
 	exitStatus := "completed"
 	summary := "本地 AI CLI 已结束"
-	exitCode := 0
 	if err != nil {
 		exitStatus = "failed"
 		summary = err.Error()
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			exitCode = exitErr.ExitCode()
-		} else {
+		if exitCode == 0 {
 			exitCode = 1
 		}
 	}
@@ -500,10 +518,282 @@ func runTerminalPassthroughCLI(options runCLIOptions) {
 		EndedAt:           time.Now().UTC().Format(time.RFC3339),
 		LastOutputSummary: summary,
 		PendingApprovals:  0,
+		ControlAddr:       "",
 	})
 	if err != nil {
 		os.Exit(exitCode)
 	}
+}
+
+func shouldFallbackToPlainTerminal(exitCode int, err error, startedAt time.Time) bool {
+	const statusDLLInitFailed = 0xC0000142
+	return err != nil && uint32(exitCode) == statusDLLInitFailed && time.Since(startedAt) < 3*time.Second
+}
+
+func runPlainTerminalPassthrough(options runCLIOptions, wd string) (int, error) {
+	cmd := exec.Command(options.CommandArgs[0], options.CommandArgs[1:]...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Dir = wd
+	err := cmd.Run()
+	if err == nil {
+		return 0, nil
+	}
+	if exitErr, ok := err.(*exec.ExitError); ok {
+		return exitErr.ExitCode(), err
+	}
+	return 1, err
+}
+
+type interactiveApprovalDetector struct {
+	mu             sync.Mutex
+	sessionID      string
+	workingDir     string
+	options        runCLIOptions
+	cliAdapter     adapter.CLIAdapter
+	writer         io.Writer
+	sequence       int64
+	outputSequence int64
+	visible        strings.Builder
+	lineBuffer     strings.Builder
+	recentLines    []string
+	pending        bool
+}
+
+func newInteractiveApprovalDetector(sessionID string, workingDir string, options runCLIOptions, cliAdapter adapter.CLIAdapter) *interactiveApprovalDetector {
+	return &interactiveApprovalDetector{
+		sessionID:  sessionID,
+		workingDir: workingDir,
+		options:    options,
+		cliAdapter: cliAdapter,
+	}
+}
+
+func (d *interactiveApprovalDetector) setWriter(writer io.Writer) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.writer = writer
+}
+
+func (d *interactiveApprovalDetector) onOutput(chunk []byte) {
+	text := cleanTerminalText(string(chunk))
+	if strings.TrimSpace(text) == "" {
+		return
+	}
+	d.mu.Lock()
+	d.outputSequence++
+	outputSequence := d.outputSequence
+	d.appendVisible(text)
+	d.appendLines(text)
+	d.sequence++
+	snapshot := adapter.TerminalSnapshot{
+		SessionID:   d.sessionID,
+		SequenceNo:  d.sequence,
+		VisibleText: d.visible.String(),
+		CursorLine:  d.currentLine(),
+		RecentLines: append([]string{}, d.recentLines...),
+	}
+	events := d.cliAdapter.Detect(snapshot)
+	shouldHandle := len(events) > 0 && !d.pending
+	var event adapter.DetectedEvent
+	if shouldHandle {
+		d.pending = true
+		event = events[0]
+	}
+	d.mu.Unlock()
+
+	if outputSequence <= 200 {
+		_ = appendLocalOutput(localOutputRecord{
+			SessionID:       d.sessionID,
+			SequenceNo:      outputSequence,
+			StreamType:      "stdout",
+			ContentRedacted: localHistoryOutputContent(text),
+			ContentHash:     "sha256:" + sha256String(text),
+			CreatedAt:       time.Now().UTC().Format(time.RFC3339),
+		})
+	}
+	if shouldHandle {
+		go d.handleApproval(event)
+	}
+}
+
+func (d *interactiveApprovalDetector) appendVisible(text string) {
+	d.visible.WriteString(text)
+	value := d.visible.String()
+	const maxVisible = 16000
+	if len(value) > maxVisible {
+		d.visible.Reset()
+		d.visible.WriteString(value[len(value)-maxVisible:])
+	}
+}
+
+func (d *interactiveApprovalDetector) appendLines(text string) {
+	for _, r := range text {
+		switch r {
+		case '\n':
+			line := strings.TrimSpace(d.lineBuffer.String())
+			d.lineBuffer.Reset()
+			if line != "" {
+				d.recentLines = append(d.recentLines, line)
+				if len(d.recentLines) > 12 {
+					d.recentLines = d.recentLines[len(d.recentLines)-12:]
+				}
+			}
+		default:
+			d.lineBuffer.WriteRune(r)
+		}
+	}
+}
+
+func (d *interactiveApprovalDetector) currentLine() string {
+	if d.lineBuffer.Len() > 0 {
+		return strings.TrimSpace(d.lineBuffer.String())
+	}
+	if len(d.recentLines) > 0 {
+		return d.recentLines[len(d.recentLines)-1]
+	}
+	return ""
+}
+
+func (d *interactiveApprovalDetector) handleApproval(event adapter.DetectedEvent) {
+	approvalID := "local_approval_" + sha256String(d.sessionID + ":" + event.PromptText)[:16]
+	createdAt := time.Now().UTC().Format(time.RFC3339)
+	approval := localApproval{
+		ApprovalID:    approvalID,
+		TenantID:      "local",
+		DeviceID:      hostname(),
+		SessionID:     d.sessionID,
+		CLIType:       d.cliAdapter.Type(),
+		EventType:     event.EventType,
+		RiskLevel:     event.RiskLevel,
+		PromptText:    event.PromptText,
+		ContextBefore: event.ContextBefore,
+		ExpiresAt:     time.Now().UTC().Add(5 * time.Minute).Format(time.RFC3339),
+	}
+	_ = upsertLocalApproval(localApprovalRecord{
+		ApprovalID:    approvalID,
+		SessionID:     d.sessionID,
+		CLIType:       d.cliAdapter.Type(),
+		EventType:     event.EventType,
+		RiskLevel:     event.RiskLevel,
+		PromptText:    event.PromptText,
+		ContextBefore: event.ContextBefore,
+		Status:        "waiting_decision",
+		CreatedAt:     createdAt,
+	})
+	_ = upsertLocalSession(localSessionRecord{
+		SessionID:         d.sessionID,
+		Status:            "waiting_approval",
+		LastOutputSummary: event.PromptText,
+		PendingApprovals:  1,
+	})
+
+	decisionType, payload, err := requestTrayDecision(approval, d.workingDir, io.Discard)
+	if err != nil {
+		decisionType, payload, err = fallbackLocalApprovalDecision(approval)
+	}
+	if err != nil {
+		d.finishApprovalPending(event.PromptText)
+		return
+	}
+	decisionInput, err := d.cliAdapter.BuildDecisionInput(adapter.ApprovalEvent{
+		EventType:     event.EventType,
+		PromptText:    event.PromptText,
+		ContextBefore: event.ContextBefore,
+	}, adapter.Decision{
+		Type:    decisionType,
+		Payload: payload,
+	})
+	if err != nil {
+		d.finishApprovalPending(event.PromptText)
+		return
+	}
+
+	d.mu.Lock()
+	writer := d.writer
+	snapshot := adapter.TerminalSnapshot{
+		SessionID:   d.sessionID,
+		SequenceNo:  d.sequence,
+		VisibleText: d.visible.String(),
+		CursorLine:  d.currentLine(),
+		RecentLines: append([]string{}, d.recentLines...),
+	}
+	d.mu.Unlock()
+	if writer == nil || !d.cliAdapter.IsPromptStillActive(snapshot, adapter.ApprovalEvent{EventType: event.EventType, PromptText: event.PromptText, ContextBefore: event.ContextBefore}) {
+		d.finishApprovalPending(event.PromptText)
+		return
+	}
+	n, err := writer.Write(decisionInput)
+	result := "written"
+	if err != nil {
+		result = "write_failed"
+	}
+	decidedAt := time.Now().UTC().Format(time.RFC3339)
+	_ = appendLocalDecision(localDecisionRecord{
+		ApprovalID:      approvalID,
+		SessionID:       d.sessionID,
+		DecisionType:    decisionType,
+		PayloadRedacted: payload,
+		BytesWritten:    n,
+		Result:          result,
+		CreatedAt:       decidedAt,
+	})
+	_ = upsertLocalApproval(localApprovalRecord{
+		ApprovalID: approvalID,
+		SessionID:  d.sessionID,
+		Status:     "delivered",
+		DecidedAt:  decidedAt,
+	})
+	_ = upsertLocalSession(localSessionRecord{
+		SessionID:         d.sessionID,
+		Status:            "running",
+		LastOutputSummary: "approval " + decisionType + " delivered",
+		PendingApprovals:  0,
+	})
+	d.finishApprovalPending(event.PromptText)
+}
+
+func (d *interactiveApprovalDetector) finishApprovalPending(prompt string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.pending = false
+}
+
+func fallbackLocalApprovalDecision(approval localApproval) (string, string, error) {
+	decision, payload, err := windowsApprovalMiniWindow(approvalPopupText(approval))
+	if err == nil && decision != "" {
+		return decision, payload, nil
+	}
+	return "", "", err
+}
+
+func cleanTerminalText(value string) string {
+	var out strings.Builder
+	inEscape := false
+	for _, r := range value {
+		if inEscape {
+			if (r >= '@' && r <= '~') || r == '\a' {
+				inEscape = false
+			}
+			continue
+		}
+		if r == '\x1b' {
+			inEscape = true
+			continue
+		}
+		switch r {
+		case '\r':
+			out.WriteByte('\n')
+		case '\n', '\t':
+			out.WriteRune(r)
+		default:
+			if r >= 32 {
+				out.WriteRune(r)
+			}
+		}
+	}
+	return out.String()
 }
 
 func aiToolTypeForCLI(cliType string) string {
