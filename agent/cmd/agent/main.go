@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -57,6 +58,8 @@ func main() {
 		supersedeApproval(os.Args[2:])
 	case "connect":
 		connectAgent(os.Args[2:])
+	case "local-ui":
+		runLocalUI(os.Args[2:])
 	case "flush-queue":
 		flushQueue(os.Args[2:])
 	case "run":
@@ -431,6 +434,325 @@ func deliveryInputType(decisionType string) string {
 	}
 }
 
+type localUIOptions struct {
+	DeviceID         string
+	TenantID         string
+	ClientInstanceID string
+	DecisionType     string
+	Payload          string
+	Once             bool
+	ReadyFile        string
+	TimeoutSeconds   int
+}
+
+type localApproval struct {
+	ApprovalID    string `json:"approval_id"`
+	TenantID      string `json:"tenant_id"`
+	DeviceID      string `json:"device_id"`
+	SessionID     string `json:"session_id"`
+	CLIType       string `json:"cli_type"`
+	EventType     string `json:"event_type"`
+	RiskLevel     string `json:"risk_level"`
+	PromptText    string `json:"prompt_text"`
+	ContextBefore string `json:"context_before"`
+	ExpiresAt     string `json:"expires_at"`
+}
+
+type localClientEvent struct {
+	Type       string
+	ApprovalID string
+}
+
+func runLocalUI(args []string) {
+	options := parseLocalUIOptions(args)
+	config, _ := loadAgentConfig()
+	if options.DeviceID == "" {
+		options.DeviceID = config.DeviceID
+	}
+	if options.DeviceID == "" {
+		fmt.Fprintln(os.Stderr, "missing --device-id and no registered agent config found")
+		os.Exit(2)
+	}
+	serverURL := getenv("GATEPILOT_SERVER_URL", config.ServerURL)
+	if serverURL == "" {
+		serverURL = "http://127.0.0.1:8080"
+	}
+	deviceToken := deviceTokenFor(options.DeviceID)
+	if options.TenantID == "" {
+		tenantID, err := tenantIDForDevice(serverURL, options.DeviceID, deviceToken)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "resolve tenant failed: %v\n", err)
+			os.Exit(1)
+		}
+		options.TenantID = tenantID
+	}
+	if options.ClientInstanceID == "" {
+		clientID, err := registerAgentDesktopClient(serverURL, options.TenantID, options.DeviceID)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "register local UI failed: %v\n", err)
+			os.Exit(1)
+		}
+		options.ClientInstanceID = clientID
+	}
+	localEvents, closeLocalEvents, err := startLocalClientNotifications(serverURL, options.TenantID, options.ClientInstanceID)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "local notification websocket warning: %v\n", err)
+	} else {
+		defer closeLocalEvents()
+	}
+	if options.ReadyFile != "" {
+		if err := os.WriteFile(options.ReadyFile, []byte("ready"), 0600); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+	}
+	fmt.Println(mustJSON(map[string]any{
+		"type":               "local_ui.connected",
+		"tenant_id":          options.TenantID,
+		"device_id":          options.DeviceID,
+		"client_instance_id": options.ClientInstanceID,
+		"client_type":        "agent_desktop",
+	}))
+
+	seen := map[string]bool{}
+	for {
+		approval, err := waitForLocalApproval(serverURL, options.TenantID, options.DeviceID, deviceToken, seen, options.TimeoutSeconds, localEvents)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "wait local approval failed: %v\n", err)
+			os.Exit(1)
+		}
+		seen[approval.ApprovalID] = true
+		notifyLocalApproval(os.Stdout, approval)
+		decisionType, payload, err := localDecisionInput(options, os.Stdin, os.Stdout)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		respBody, err := submitLocalApprovalDecision(serverURL, approval.ApprovalID, options.ClientInstanceID, decisionType, payload)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "submit local decision failed: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println(mustJSON(map[string]any{
+			"type":               "local_ui.decision_submitted",
+			"approval_id":        approval.ApprovalID,
+			"session_id":         approval.SessionID,
+			"decision_type":      decisionType,
+			"client_instance_id": options.ClientInstanceID,
+			"client_type":        "agent_desktop",
+			"delivery_id":        responseDataString(respBody, "delivery_id"),
+		}))
+		if options.Once {
+			return
+		}
+	}
+}
+
+func parseLocalUIOptions(args []string) localUIOptions {
+	options := localUIOptions{}
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--device-id":
+			if i+1 < len(args) {
+				options.DeviceID = args[i+1]
+				i++
+			}
+		case "--tenant-id":
+			if i+1 < len(args) {
+				options.TenantID = args[i+1]
+				i++
+			}
+		case "--client-instance-id":
+			if i+1 < len(args) {
+				options.ClientInstanceID = args[i+1]
+				i++
+			}
+		case "--decision":
+			if i+1 < len(args) {
+				options.DecisionType = args[i+1]
+				i++
+			}
+		case "--payload":
+			if i+1 < len(args) {
+				options.Payload = args[i+1]
+				i++
+			}
+		case "--once", "--confirm-once":
+			options.Once = true
+		case "--ready-file":
+			if i+1 < len(args) {
+				options.ReadyFile = args[i+1]
+				i++
+			}
+		case "--timeout-seconds":
+			if i+1 < len(args) {
+				fmt.Sscanf(args[i+1], "%d", &options.TimeoutSeconds)
+				i++
+			}
+		}
+	}
+	return options
+}
+
+func tenantIDForDevice(serverURL string, deviceID string, token string) (string, error) {
+	body, err := getJSONWithToken(serverURL+"/api/v1/devices/"+url.PathEscape(deviceID), token)
+	if err != nil {
+		return "", err
+	}
+	return responseDataString(body, "tenant_id"), nil
+}
+
+func registerAgentDesktopClient(serverURL string, tenantID string, deviceID string) (string, error) {
+	body := mustMarshal(map[string]any{
+		"tenant_id":    tenantID,
+		"client_type":  "agent_desktop",
+		"device_id":    deviceID,
+		"display_name": hostname() + " Agent",
+		"app_version":  version,
+		"platform":     runtime.GOOS,
+	})
+	respBody, err := postJSONWithHeaders(serverURL+"/api/v1/client-instances", body, "", map[string]string{
+		"Idempotency-Key": "agent-desktop-" + deviceID,
+	})
+	if err != nil {
+		return "", err
+	}
+	clientID := responseDataString(respBody, "client_instance_id")
+	if clientID == "" {
+		return "", fmt.Errorf("client_instance_id missing in response")
+	}
+	return clientID, nil
+}
+
+func startLocalClientNotifications(serverURL string, tenantID string, clientInstanceID string) (<-chan localClientEvent, func(), error) {
+	wsURL := httpURLToWS(serverURL) + "/ws/client?tenant_id=" + url.QueryEscape(tenantID) + "&client_instance_id=" + url.QueryEscape(clientInstanceID)
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		return nil, nil, err
+	}
+	events := make(chan localClientEvent, 8)
+	go func() {
+		defer close(events)
+		defer conn.Close()
+		for {
+			var msg struct {
+				Type    string          `json:"type"`
+				Payload json.RawMessage `json:"payload"`
+			}
+			if err := conn.ReadJSON(&msg); err != nil {
+				return
+			}
+			event := localClientEvent{Type: msg.Type}
+			var payload struct {
+				ApprovalID string `json:"approval_id"`
+			}
+			if err := json.Unmarshal(msg.Payload, &payload); err == nil {
+				event.ApprovalID = payload.ApprovalID
+			}
+			select {
+			case events <- event:
+			default:
+			}
+		}
+	}()
+	return events, func() { _ = conn.Close() }, nil
+}
+
+func waitForLocalApproval(serverURL string, tenantID string, deviceID string, token string, seen map[string]bool, timeoutSeconds int, events <-chan localClientEvent) (localApproval, error) {
+	deadline := time.Time{}
+	if timeoutSeconds > 0 {
+		deadline = time.Now().Add(time.Duration(timeoutSeconds) * time.Second)
+	}
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		items, err := listWaitingLocalApprovals(serverURL, tenantID, deviceID, token)
+		if err != nil {
+			return localApproval{}, err
+		}
+		for _, item := range items {
+			if !seen[item.ApprovalID] {
+				return item, nil
+			}
+		}
+		if !deadline.IsZero() && time.Now().After(deadline) {
+			return localApproval{}, fmt.Errorf("timed out waiting for local approval")
+		}
+		select {
+		case _, ok := <-events:
+			if !ok {
+				events = nil
+			}
+		case <-ticker.C:
+		}
+	}
+}
+
+func listWaitingLocalApprovals(serverURL string, tenantID string, deviceID string, token string) ([]localApproval, error) {
+	body, err := getJSONWithToken(serverURL+"/api/v1/tenants/"+url.PathEscape(tenantID)+"/approvals?status=waiting_decision", token)
+	if err != nil {
+		return nil, err
+	}
+	var response struct {
+		Data struct {
+			Items []localApproval `json:"items"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &response); err != nil {
+		return nil, err
+	}
+	filtered := []localApproval{}
+	for _, item := range response.Data.Items {
+		if item.DeviceID == deviceID {
+			filtered = append(filtered, item)
+		}
+	}
+	return filtered, nil
+}
+
+func notifyLocalApproval(writer io.Writer, approval localApproval) {
+	fmt.Fprintln(writer, mustJSON(map[string]any{
+		"type":           "local_ui.approval_notification",
+		"approval_id":    approval.ApprovalID,
+		"session_id":     approval.SessionID,
+		"device_id":      approval.DeviceID,
+		"risk_level":     approval.RiskLevel,
+		"event_type":     approval.EventType,
+		"prompt_text":    approval.PromptText,
+		"context_before": approval.ContextBefore,
+		"expires_at":     approval.ExpiresAt,
+	}))
+}
+
+func localDecisionInput(options localUIOptions, reader io.Reader, writer io.Writer) (string, string, error) {
+	decisionType := strings.TrimSpace(options.DecisionType)
+	if decisionType == "" {
+		fmt.Fprint(writer, "Decision [approve/reject/reply]: ")
+		line, err := readDecisionLine(reader)
+		if err != nil {
+			return "", "", err
+		}
+		decisionType = line
+	}
+	switch decisionType {
+	case "approve", "reject", "reply":
+	default:
+		return "", "", fmt.Errorf("unsupported local decision %q", decisionType)
+	}
+	return decisionType, options.Payload, nil
+}
+
+func submitLocalApprovalDecision(serverURL string, approvalID string, clientInstanceID string, decisionType string, payload string) ([]byte, error) {
+	body := mustMarshal(map[string]any{
+		"decision_type": decisionType,
+		"payload":       payload,
+	})
+	return postJSONWithHeaders(serverURL+"/api/v1/approvals/"+url.PathEscape(approvalID)+"/decision", body, "", map[string]string{
+		"Idempotency-Key":      "agent-local-" + approvalID + "-" + fmt.Sprintf("%d", time.Now().UnixNano()),
+		"X-Client-Instance-Id": clientInstanceID,
+	})
+}
+
 func ackDecision(args []string) {
 	approvalID := ""
 	deliveryID := ""
@@ -776,6 +1098,10 @@ func registerDevice(args []string) {
 }
 
 func postJSONWithToken(url string, body []byte, token string) ([]byte, error) {
+	return postJSONWithHeaders(url, body, token, nil)
+}
+
+func postJSONWithHeaders(url string, body []byte, token string, headers map[string]string) ([]byte, error) {
 	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
@@ -783,6 +1109,9 @@ func postJSONWithToken(url string, body []byte, token string) ([]byte, error) {
 	req.Header.Set("Content-Type", "application/json")
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	for key, value := range headers {
+		req.Header.Set(key, value)
 	}
 
 	client := http.Client{Timeout: 10 * time.Second}
@@ -792,6 +1121,27 @@ func postJSONWithToken(url string, body []byte, token string) ([]byte, error) {
 	}
 	defer resp.Body.Close()
 
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("%s\n%s", resp.Status, string(respBody))
+	}
+	return respBody, nil
+}
+
+func getJSONWithToken(url string, token string) ([]byte, error) {
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	client := http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
 	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("%s\n%s", resp.Status, string(respBody))

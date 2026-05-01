@@ -78,6 +78,47 @@ func TestDeviceSessionApprovalFlow(t *testing.T) {
 	}
 }
 
+func TestApprovalDecisionUsesAgentDesktopClientInstance(t *testing.T) {
+	resetTestStore()
+	server := httptest.NewServer(newRouter())
+	defer server.Close()
+
+	code := createTestActivationCode(t, server.URL)
+	deviceID := registerTestDevice(t, server.URL, code)
+	sessionID := createTestSession(t, server.URL, deviceID)
+	approvalID := createTestApproval(t, server.URL, deviceID, sessionID)
+
+	client := postJSON(t, server.URL+"/api/v1/client-instances", map[string]any{
+		"tenant_id":    testTenantID,
+		"client_type":  "agent_desktop",
+		"device_id":    deviceID,
+		"display_name": "Test Agent Desktop",
+		"app_version":  version,
+		"platform":     "windows",
+	}, http.StatusCreated)
+	clientInstanceID := dataString(t, client, "client_instance_id")
+
+	decision := postJSONWithHeaders(t, server.URL+"/api/v1/approvals/"+approvalID+"/decision", map[string]any{
+		"decision_type": "approve",
+		"payload":       "",
+	}, map[string]string{
+		"Idempotency-Key":      randomUUID(),
+		"X-Client-Instance-Id": clientInstanceID,
+	}, http.StatusOK)
+
+	data, ok := decision["data"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing decision data: %v", decision)
+	}
+	decidedBy, ok := data["decided_by"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing decided_by: %v", decision)
+	}
+	if decidedBy["client_type"] != "agent_desktop" || decidedBy["client_instance_id"] != clientInstanceID {
+		t.Fatalf("decided_by = %v, want agent desktop client %s", decidedBy, clientInstanceID)
+	}
+}
+
 func TestHealthEndpoints(t *testing.T) {
 	resetTestStore()
 	server := httptest.NewServer(newRouter())

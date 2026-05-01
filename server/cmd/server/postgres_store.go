@@ -113,6 +113,22 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'active', $9, $9, $9)`,
 	return item, nil
 }
 
+func (s *postgresStore) GetClientInstance(clientInstanceID string) (clientInstance, *appError) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	item, err := scanClientInstance(s.db.QueryRowContext(ctx, `
+SELECT id::text, tenant_id::text, user_id::text, client_type, COALESCE(device_id::text, ''), display_name, app_version, platform, push_provider, status, last_seen_at, created_at
+FROM client_instances
+WHERE id = $1`, clientInstanceID))
+	if err == sql.ErrNoRows {
+		return clientInstance{}, &appError{HTTPStatus: http.StatusNotFound, Code: "client_instance_not_found", Message: "client instance not found"}
+	}
+	if err != nil {
+		return clientInstance{}, internalStoreError(err)
+	}
+	return item, nil
+}
+
 func (s *postgresStore) RegisterPushToken(clientInstanceID string, req registerPushTokenRequest, now time.Time) (clientInstance, *appError) {
 	if req.Provider == "" || req.Token == "" {
 		return clientInstance{}, &appError{HTTPStatus: http.StatusBadRequest, Code: "message_schema_invalid", Message: "provider and token are required"}

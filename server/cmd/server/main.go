@@ -296,6 +296,7 @@ type storeHealthChecker interface {
 
 type gatePilotStore interface {
 	RegisterClientInstance(req registerClientInstanceRequest, userID string, idempotencyKey string, now time.Time) (clientInstance, *appError)
+	GetClientInstance(clientInstanceID string) (clientInstance, *appError)
 	UpdateClientInstance(clientInstanceID string, req updateClientInstanceRequest, now time.Time) (clientInstance, *appError)
 	LogoutClientInstance(clientInstanceID string, now time.Time) (clientInstance, *appError)
 	CreateActivationCode(tenantID string, req createActivationCodeRequest, idempotencyKey string, now time.Time) (string, time.Time, *appError)
@@ -450,6 +451,16 @@ func (s *memoryStore) RegisterClientInstance(req registerClientInstanceRequest, 
 	}
 	s.clientInstances[item.ClientInstanceID] = item
 	s.clientInstanceReplay[replayKey] = clientInstanceReplay{Signature: signature, Item: item}
+	return item, nil
+}
+
+func (s *memoryStore) GetClientInstance(clientInstanceID string) (clientInstance, *appError) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	item, ok := s.clientInstances[clientInstanceID]
+	if !ok {
+		return clientInstance{}, &appError{HTTPStatus: http.StatusNotFound, Code: "client_instance_not_found", Message: "client instance not found"}
+	}
 	return item, nil
 }
 
@@ -2347,12 +2358,10 @@ func submitApprovalDecisionHandler(w http.ResponseWriter, r *http.Request, appro
 		writeError(w, r, http.StatusBadRequest, "message_schema_invalid", err.Error())
 		return
 	}
-	decidedBy := map[string]string{
-		"actor_type":         "user",
-		"actor_id":           "00000000-0000-0000-0000-000000000001",
-		"display_name":       "Local Owner",
-		"client_instance_id": firstNonEmpty(r.Header.Get("X-Client-Instance-Id"), "00000000-0000-0000-0000-000000000200"),
-		"client_type":        "web",
+	decidedBy, appErr := approvalDecisionActor(r, item)
+	if appErr != nil {
+		writeAppError(w, r, appErr)
+		return
 	}
 	item, appErr = store.SubmitApprovalDecision(approvalID, req, r.Header.Get("Idempotency-Key"), decidedBy, time.Now().UTC())
 	if appErr != nil {
@@ -2384,6 +2393,37 @@ func submitApprovalDecisionHandler(w http.ResponseWriter, r *http.Request, appro
 		RequestID: requestID(r),
 		TraceID:   traceID(r),
 	})
+}
+
+func approvalDecisionActor(r *http.Request, item approval) (map[string]string, *appError) {
+	clientInstanceID := firstNonEmpty(r.Header.Get("X-Client-Instance-Id"), "00000000-0000-0000-0000-000000000200")
+	actor := map[string]string{
+		"actor_type":         "user",
+		"actor_id":           devUserID(r),
+		"display_name":       "Local Owner",
+		"client_instance_id": clientInstanceID,
+		"client_type":        "web",
+	}
+	if r.Header.Get("X-Client-Instance-Id") == "" {
+		return actor, nil
+	}
+	client, appErr := store.GetClientInstance(clientInstanceID)
+	if appErr != nil {
+		if appErr.Code == "client_instance_not_found" {
+			return actor, nil
+		}
+		return nil, appErr
+	}
+	if client.TenantID != item.TenantID {
+		return nil, &appError{HTTPStatus: http.StatusForbidden, Code: "tenant_access_denied", Message: "client instance does not belong to approval tenant"}
+	}
+	if client.ClientType == "agent_desktop" && client.DeviceID != "" && client.DeviceID != item.DeviceID {
+		return nil, &appError{HTTPStatus: http.StatusForbidden, Code: "device_access_denied", Message: "agent desktop client is bound to a different device"}
+	}
+	actor["actor_id"] = firstNonEmpty(client.UserID, devUserID(r))
+	actor["display_name"] = firstNonEmpty(client.DisplayName, actor["display_name"])
+	actor["client_type"] = client.ClientType
+	return actor, nil
 }
 
 func devUserID(r *http.Request) string {

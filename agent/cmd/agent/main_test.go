@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -155,6 +156,57 @@ func TestDeliveryInputTypeMapsPolicyDecisions(t *testing.T) {
 	}
 	if got := deliveryInputType("policy_reject"); got != "reject" {
 		t.Fatalf("policy reject maps to %q, want reject", got)
+	}
+}
+
+func TestLocalDecisionInputUsesConfiguredDecision(t *testing.T) {
+	decision, payload, err := localDecisionInput(localUIOptions{
+		DecisionType: "approve",
+		Payload:      "looks good",
+	}, strings.NewReader(""), io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decision != "approve" || payload != "looks good" {
+		t.Fatalf("decision=%q payload=%q, want approve payload", decision, payload)
+	}
+}
+
+func TestLocalDecisionInputRejectsUnsupportedDecision(t *testing.T) {
+	_, _, err := localDecisionInput(localUIOptions{DecisionType: "maybe"}, strings.NewReader(""), io.Discard)
+	if err == nil {
+		t.Fatal("expected unsupported decision error")
+	}
+}
+
+func TestRegisterAgentDesktopClientPostsClientInstance(t *testing.T) {
+	received := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/client-instances" {
+			t.Fatalf("path = %s, want client-instances", r.URL.Path)
+		}
+		if got := r.Header.Get("Idempotency-Key"); got != "agent-desktop-device-1" {
+			t.Fatalf("idempotency key = %q, want stable agent desktop key", got)
+		}
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+		if payload["client_type"] != "agent_desktop" || payload["device_id"] != "device-1" || payload["tenant_id"] != "tenant-1" {
+			t.Fatalf("payload = %v, want agent desktop registration", payload)
+		}
+		received++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"client_instance_id":"client-1"}}`))
+	}))
+	defer server.Close()
+
+	clientID, err := registerAgentDesktopClient(server.URL, "tenant-1", "device-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if clientID != "client-1" || received != 1 {
+		t.Fatalf("clientID=%q received=%d, want client-1 once", clientID, received)
 	}
 }
 
