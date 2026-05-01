@@ -13,6 +13,11 @@ D:\Dev\Env\Go\bin\go.exe run .\cmd\agent local-ui --tenant-id <tenant_id> --devi
 D:\Dev\Env\Go\bin\go.exe run .\cmd\agent run --local-only --decision approve -- fake-ai-cli
 D:\Dev\Env\Go\bin\go.exe run .\cmd\agent run --local-only --popup -- fake-ai-cli
 D:\Dev\Env\Go\bin\go.exe run .\cmd\agent tray
+D:\Dev\Env\Go\bin\go.exe run .\cmd\agent status
+D:\Dev\Env\Go\bin\go.exe run .\cmd\agent history
+D:\Dev\Env\Go\bin\go.exe run .\cmd\agent login --server-url <url> --tenant-id <tenant_id> --device-id <device_id>
+D:\Dev\Env\Go\bin\go.exe run .\cmd\agent offline
+D:\Dev\Env\Go\bin\go.exe run .\cmd\agent logout
 D:\Dev\Env\Go\bin\go.exe run .\cmd\agent create-session --device-id <device_id>
 D:\Dev\Env\Go\bin\go.exe run .\cmd\agent detect-approval --device-id <device_id> --session-id <session_id>
 D:\Dev\Env\Go\bin\go.exe run .\cmd\agent ack-decision --approval-id <approval_id> --delivery-id <delivery_id> --session-id <session_id>
@@ -26,5 +31,9 @@ D:\Dev\Env\Go\bin\go.exe run .\cmd\agent run-fake
 `run --local-only` does not require registration or a server. It detects a local CLI approval prompt, prints a local notification, asks for approve/reject/reply unless `--decision` is provided, and writes the decision directly back to the CLI. On Windows, add `--popup` to show a native Yes/No confirmation dialog; Yes maps to approve and No maps to reject.
 
 `tray` starts the Windows tray control process in offline mode by default. When it is running, `run --local-only` sends detected approvals to the tray first; the tray applies the local notification settings and returns approve/reject/reply to the session host.
+
+`history` reads the local offline session history. Use `history --session-id <session_id>` for output chunks, approvals, and decisions for one session.
+
+`login` stores desktop online settings after registering an `agent_desktop` client instance. `offline` keeps the login identity but switches back to local-only mode. `logout` clears the desktop login identity and leaves the agent offline.
 
 Queued approval detections are stored in `%APPDATA%\GatePilot\approval-queue.jsonl` by default. Set `GATEPILOT_AGENT_QUEUE` to override the file path for tests or isolated runs.

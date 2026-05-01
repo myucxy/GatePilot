@@ -290,10 +290,153 @@ func TestTraySettingsHandlerPersistsSettings(t *testing.T) {
 	}
 }
 
+func TestTrayLoginAndOfflineEndpointsPersistSettings(t *testing.T) {
+	settingsPath := filepath.Join(t.TempDir(), "settings.json")
+	t.Setenv("GATEPILOT_AGENT_SETTINGS", settingsPath)
+
+	identityServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/client-instances" {
+			t.Fatalf("path = %s, want client-instances", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"client_instance_id":"client-1"}}`))
+	}))
+	defer identityServer.Close()
+
+	state := &trayState{settings: defaultAgentLocalSettings()}
+	server := httptest.NewServer(newTrayHTTPHandler(state))
+	defer server.Close()
+
+	loginBody := mustMarshal(agentLoginOptions{
+		ServerURL: identityServer.URL,
+		TenantID:  "tenant-1",
+		DeviceID:  "device-1",
+	})
+	loginResp, err := http.Post(server.URL+"/api/local/login", "application/json", bytes.NewReader(loginBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer loginResp.Body.Close()
+	if loginResp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(loginResp.Body)
+		t.Fatalf("login status = %d body=%s, want 200", loginResp.StatusCode, body)
+	}
+	if settings := state.currentSettings(); settings.Mode != "online" || settings.ClientInstanceID != "client-1" {
+		t.Fatalf("settings = %+v, want online login", settings)
+	}
+
+	offlineResp, err := http.Post(server.URL+"/api/local/offline", "application/json", bytes.NewReader(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer offlineResp.Body.Close()
+	if offlineResp.StatusCode != http.StatusOK {
+		t.Fatalf("offline status = %d, want 200", offlineResp.StatusCode)
+	}
+	if settings := state.currentSettings(); settings.Mode != "offline" || settings.ClientInstanceID != "client-1" {
+		t.Fatalf("settings = %+v, want offline with login identity retained", settings)
+	}
+
+	logoutResp, err := http.Post(server.URL+"/api/local/logout", "application/json", bytes.NewReader(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer logoutResp.Body.Close()
+	if logoutResp.StatusCode != http.StatusOK {
+		t.Fatalf("logout status = %d, want 200", logoutResp.StatusCode)
+	}
+	if settings := state.currentSettings(); settings.Mode != "offline" || settings.ClientInstanceID != "" || settings.DeviceID != "" {
+		t.Fatalf("settings = %+v, want offline logged out", settings)
+	}
+}
+
+func TestTraySessionHistoryEndpoints(t *testing.T) {
+	t.Setenv("GATEPILOT_AGENT_HISTORY", filepath.Join(t.TempDir(), "history.json"))
+	if err := upsertLocalSession(localSessionRecord{
+		SessionID:           "session-1",
+		CLIType:             "custom",
+		CommandLineRedacted: "fake-ai-cli",
+		Status:              "completed",
+		StartedAt:           "2026-05-01T00:00:00Z",
+		LastOutputSummary:   "done",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	state := &trayState{settings: defaultAgentLocalSettings()}
+	server := httptest.NewServer(newTrayHTTPHandler(state))
+	defer server.Close()
+
+	listResp, err := http.Get(server.URL + "/api/local/sessions")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listResp.Body.Close()
+	if listResp.StatusCode != http.StatusOK {
+		t.Fatalf("list status = %d, want 200", listResp.StatusCode)
+	}
+	var listBody struct {
+		Data struct {
+			Items []localSessionRecord `json:"items"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(listResp.Body).Decode(&listBody); err != nil {
+		t.Fatal(err)
+	}
+	if len(listBody.Data.Items) != 1 || listBody.Data.Items[0].SessionID != "session-1" {
+		t.Fatalf("sessions = %+v, want session-1", listBody.Data.Items)
+	}
+
+	detailResp, err := http.Get(server.URL + "/api/local/sessions/session-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer detailResp.Body.Close()
+	if detailResp.StatusCode != http.StatusOK {
+		t.Fatalf("detail status = %d, want 200", detailResp.StatusCode)
+	}
+}
+
+func TestSendLocalSessionInputWritesToActiveHost(t *testing.T) {
+	t.Setenv("GATEPILOT_AGENT_HISTORY", filepath.Join(t.TempDir(), "history.json"))
+	var sink bytes.Buffer
+	host, err := startLocalSessionHost("session-1", &sink)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer host.Close()
+	if err := upsertLocalSession(localSessionRecord{
+		SessionID:           "session-1",
+		CLIType:             "custom",
+		CommandLineRedacted: "fake-ai-cli",
+		Status:              "running",
+		StartedAt:           "2026-05-01T00:00:00Z",
+		ControlAddr:         localHostAddress(host),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := sendLocalSessionInput("session-1", "continue"); err != nil {
+		t.Fatal(err)
+	}
+	if got := sink.String(); got != "continue\r" {
+		t.Fatalf("input = %q, want continue carriage return", got)
+	}
+	detail, ok, err := localSessionDetail("session-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("missing session detail")
+	}
+	decisions := detail["decisions"].([]localDecisionRecord)
+	if len(decisions) != 1 || decisions[0].DecisionType != "reply" || decisions[0].Result != "manual_input" {
+		t.Fatalf("decisions = %+v, want manual reply record", decisions)
+	}
+}
+
 func TestConfirmLocalApprovalWritesDecisionInput(t *testing.T) {
 	var decisionSink bytes.Buffer
 	var output bytes.Buffer
-	ackResult, bytesWritten, err := confirmLocalApproval(&decisionSink, adapter.ForCLI("custom"), adapter.DetectedEvent{
+	ackResult, bytesWritten, decisionType, _, err := confirmLocalApproval(&decisionSink, adapter.ForCLI("custom"), adapter.DetectedEvent{
 		EventType:     "permission_request",
 		RiskLevel:     "high",
 		PromptText:    "allow command?",
@@ -302,8 +445,8 @@ func TestConfirmLocalApprovalWritesDecisionInput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ackResult != "written" || bytesWritten == 0 || strings.TrimSpace(decisionSink.String()) != "approve" {
-		t.Fatalf("ack=%q bytes=%d decision=%q, want approve written", ackResult, bytesWritten, decisionSink.String())
+	if ackResult != "written" || decisionType != "approve" || bytesWritten == 0 || strings.TrimSpace(decisionSink.String()) != "approve" {
+		t.Fatalf("ack=%q type=%q bytes=%d decision=%q, want approve written", ackResult, decisionType, bytesWritten, decisionSink.String())
 	}
 	if !strings.Contains(output.String(), "local_ui.approval_notification") || !strings.Contains(output.String(), "local_only.decision_written") {
 		t.Fatalf("output = %q, want local notification and decision written events", output.String())

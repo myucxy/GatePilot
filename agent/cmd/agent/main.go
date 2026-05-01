@@ -76,6 +76,16 @@ func main() {
 		runLocalUI(os.Args[2:])
 	case "tray":
 		runAgentTray(os.Args[2:])
+	case "history":
+		printLocalHistory(os.Args[2:])
+	case "status":
+		printAgentStatus()
+	case "login":
+		loginAgentDesktop(os.Args[2:])
+	case "logout":
+		logoutAgentDesktop()
+	case "offline":
+		enableAgentOfflineMode()
 	case "flush-queue":
 		flushQueue(os.Args[2:])
 	case "run":
@@ -92,6 +102,7 @@ func runManagedCLI(args []string) {
 	options := parseRunCLIOptions(args)
 	options.CLIType = adapter.NormalizeCLIType(options.CLIType)
 	cliAdapter := adapter.ForCLI(options.CLIType)
+	localSessionID := "local_session_" + fmt.Sprintf("%d", time.Now().UnixNano())
 
 	cmd := exec.Command(os.Args[0], "run-fake")
 	stdout, err := cmd.StdoutPipe()
@@ -103,6 +114,25 @@ func runManagedCLI(args []string) {
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
+	}
+	var localHost *localSessionHost
+	if options.LocalOnly {
+		localHost, err = startLocalSessionHost(localSessionID, stdin)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "local session control warning: %v\n", err)
+		}
+		wd := currentWorkingDir()
+		_ = upsertLocalSession(localSessionRecord{
+			SessionID:           localSessionID,
+			CLIType:             options.CLIType,
+			CommandLineRedacted: options.CommandLine,
+			WorkingDir:          wd,
+			WorkingDirHash:      "sha256:" + sha256String(wd),
+			Status:              "running",
+			StartedAt:           time.Now().UTC().Format(time.RFC3339),
+			LastOutputSummary:   "local CLI session started",
+			ControlAddr:         localHostAddress(localHost),
+		})
 	}
 	cmd.Stderr = os.Stderr
 	if err := cmd.Start(); err != nil {
@@ -116,25 +146,103 @@ func runManagedCLI(args []string) {
 		os.Exit(1)
 	}
 	if options.LocalOnly {
-		ackResult, bytesWritten, err := confirmLocalApproval(stdin, cliAdapter, event, localUIOptions{
+		approvalID := "local_approval_" + sha256String(localSessionID + ":" + event.PromptText)[:16]
+		_ = appendLocalOutput(localOutputRecord{
+			SessionID:       localSessionID,
+			SequenceNo:      1,
+			StreamType:      "stdout",
+			ContentRedacted: outputText,
+			ContentHash:     "sha256:" + sha256String(outputText),
+			CreatedAt:       time.Now().UTC().Format(time.RFC3339),
+		})
+		_ = upsertLocalApproval(localApprovalRecord{
+			ApprovalID:    approvalID,
+			SessionID:     localSessionID,
+			CLIType:       options.CLIType,
+			EventType:     event.EventType,
+			RiskLevel:     event.RiskLevel,
+			PromptText:    event.PromptText,
+			ContextBefore: event.ContextBefore,
+			Status:        "waiting_decision",
+			CreatedAt:     time.Now().UTC().Format(time.RFC3339),
+		})
+		_ = upsertLocalSession(localSessionRecord{
+			SessionID:         localSessionID,
+			Status:            "waiting_approval",
+			LastOutputSummary: event.PromptText,
+			PendingApprovals:  1,
+			ControlAddr:       localHostAddress(localHost),
+		})
+		ackResult, bytesWritten, decisionType, decisionPayload, err := confirmLocalApproval(stdin, cliAdapter, event, localUIOptions{
 			DecisionType: options.Decision,
 			Payload:      options.Payload,
 			Popup:        options.Popup,
 		}, os.Stdin, os.Stdout)
-		_ = stdin.Close()
 		if err != nil {
 			_ = cmd.Process.Kill()
 			fmt.Fprintf(os.Stderr, "local confirmation failed: %v\n", err)
 			os.Exit(1)
 		}
+		decidedAt := time.Now().UTC().Format(time.RFC3339)
+		_ = appendLocalDecision(localDecisionRecord{
+			ApprovalID:      approvalID,
+			SessionID:       localSessionID,
+			DecisionType:    decisionType,
+			PayloadRedacted: decisionPayload,
+			BytesWritten:    bytesWritten,
+			Result:          ackResult,
+			CreatedAt:       decidedAt,
+		})
+		_ = upsertLocalApproval(localApprovalRecord{
+			ApprovalID: approvalID,
+			SessionID:  localSessionID,
+			Status:     "delivered",
+			DecidedAt:  decidedAt,
+		})
+		_ = upsertLocalSession(localSessionRecord{
+			SessionID:         localSessionID,
+			Status:            "running",
+			LastOutputSummary: "approval " + decisionType + " delivered",
+			PendingApprovals:  0,
+			ControlAddr:       localHostAddress(localHost),
+		})
 		if remainingOutput, readErr := io.ReadAll(remainingStdout); readErr == nil && len(remainingOutput) > 0 {
 			fmt.Print(string(remainingOutput))
+			_ = appendLocalOutput(localOutputRecord{
+				SessionID:       localSessionID,
+				SequenceNo:      2,
+				StreamType:      "stdout",
+				ContentRedacted: string(remainingOutput),
+				ContentHash:     "sha256:" + sha256String(string(remainingOutput)),
+				CreatedAt:       time.Now().UTC().Format(time.RFC3339),
+			})
 		}
-		if err := cmd.Wait(); err != nil {
-			fmt.Fprintf(os.Stderr, "local CLI exited after decision: %v\n", err)
+		waitErr := cmd.Wait()
+		if localHost != nil {
+			_ = localHost.Close()
+		}
+		exitStatus := "completed"
+		summary := "local CLI completed"
+		if waitErr != nil {
+			exitStatus = "failed"
+			summary = waitErr.Error()
+		}
+		_ = stdin.Close()
+		_ = upsertLocalSession(localSessionRecord{
+			SessionID:         localSessionID,
+			Status:            exitStatus,
+			EndedAt:           time.Now().UTC().Format(time.RFC3339),
+			LastOutputSummary: summary,
+			PendingApprovals:  0,
+			ControlAddr:       "",
+		})
+		if waitErr != nil {
+			fmt.Fprintf(os.Stderr, "local CLI exited after decision: %v\n", waitErr)
 			os.Exit(1)
 		}
 		fmt.Println(mustJSON(map[string]any{
+			"session_id":    localSessionID,
+			"approval_id":   approvalID,
 			"type":          "local_only.completed",
 			"ack_result":    ackResult,
 			"bytes_written": bytesWritten,
@@ -267,6 +375,13 @@ type agentLocalSettings struct {
 	ClientInstanceID     string `json:"client_instance_id"`
 }
 
+type agentLoginOptions struct {
+	ServerURL        string `json:"server_url"`
+	TenantID         string `json:"tenant_id"`
+	DeviceID         string `json:"device_id"`
+	ClientInstanceID string `json:"client_instance_id"`
+}
+
 type trayApprovalRequest struct {
 	Approval   localApproval `json:"approval"`
 	WorkingDir string        `json:"working_dir"`
@@ -277,6 +392,10 @@ type trayDecisionResponse struct {
 	DecisionType string `json:"decision_type"`
 	Payload      string `json:"payload"`
 	Result       string `json:"result"`
+}
+
+type localSessionInputRequest struct {
+	Text string `json:"text"`
 }
 
 type trayPendingApproval struct {
@@ -367,6 +486,181 @@ func agentSettingsPath() (string, error) {
 	return filepath.Join(configDir, "GatePilot", "settings.json"), nil
 }
 
+func parseAgentLoginOptions(args []string) agentLoginOptions {
+	options := agentLoginOptions{}
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--server-url":
+			if i+1 < len(args) {
+				options.ServerURL = args[i+1]
+				i++
+			}
+		case "--tenant-id":
+			if i+1 < len(args) {
+				options.TenantID = args[i+1]
+				i++
+			}
+		case "--device-id":
+			if i+1 < len(args) {
+				options.DeviceID = args[i+1]
+				i++
+			}
+		case "--client-instance-id":
+			if i+1 < len(args) {
+				options.ClientInstanceID = args[i+1]
+				i++
+			}
+		}
+	}
+	return options
+}
+
+func loginAgentDesktop(args []string) {
+	settings, err := configureAgentDesktopLogin(parseAgentLoginOptions(args))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "login failed: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Println(mustJSON(map[string]any{
+		"type":      "agent.login_configured",
+		"settings":  settings,
+		"logged_in": agentSettingsLoggedIn(settings),
+	}))
+}
+
+func printAgentStatus() {
+	settings, err := loadAgentLocalSettings()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "status failed: %v\n", err)
+		os.Exit(1)
+	}
+	state := &trayState{settings: settings}
+	fmt.Println(mustJSON(map[string]any{
+		"type": "agent.status",
+		"data": localAgentStatus(state),
+	}))
+}
+
+func logoutAgentDesktop() {
+	settings, err := clearAgentDesktopLogin()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "logout failed: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Println(mustJSON(map[string]any{
+		"type":      "agent.logged_out",
+		"settings":  settings,
+		"logged_in": false,
+	}))
+}
+
+func enableAgentOfflineMode() {
+	settings, err := setAgentOfflineMode()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "offline mode failed: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Println(mustJSON(map[string]any{
+		"type":      "agent.offline_enabled",
+		"settings":  settings,
+		"logged_in": agentSettingsLoggedIn(settings),
+	}))
+}
+
+func configureAgentDesktopLogin(options agentLoginOptions) (agentLocalSettings, error) {
+	settings, err := loadAgentLocalSettings()
+	if err != nil {
+		return settings, err
+	}
+	config, _ := loadAgentConfig()
+	if options.ServerURL == "" {
+		options.ServerURL = firstNonEmptyLocal(settings.ServerURL, getenv("GATEPILOT_SERVER_URL", config.ServerURL))
+	}
+	if options.DeviceID == "" {
+		options.DeviceID = firstNonEmptyLocal(settings.DeviceID, config.DeviceID)
+	}
+	if options.TenantID == "" {
+		options.TenantID = settings.TenantID
+	}
+	if options.ServerURL == "" {
+		return settings, fmt.Errorf("--server-url is required")
+	}
+	if options.DeviceID == "" {
+		return settings, fmt.Errorf("--device-id is required")
+	}
+	if options.TenantID == "" {
+		tenantID, err := tenantIDForDevice(options.ServerURL, options.DeviceID, deviceTokenFor(options.DeviceID))
+		if err != nil {
+			return settings, err
+		}
+		options.TenantID = tenantID
+	}
+	if options.ClientInstanceID == "" {
+		clientID, err := registerAgentDesktopClient(options.ServerURL, options.TenantID, options.DeviceID)
+		if err != nil {
+			return settings, err
+		}
+		options.ClientInstanceID = clientID
+	}
+	settings.Mode = "online"
+	settings.ServerURL = options.ServerURL
+	settings.TenantID = options.TenantID
+	settings.DeviceID = options.DeviceID
+	settings.ClientInstanceID = options.ClientInstanceID
+	if err := saveAgentLocalSettings(settings); err != nil {
+		return settings, err
+	}
+	return normalizeAgentLocalSettings(settings), nil
+}
+
+func clearAgentDesktopLogin() (agentLocalSettings, error) {
+	settings, err := loadAgentLocalSettings()
+	if err != nil {
+		return settings, err
+	}
+	settings.Mode = "offline"
+	settings.TenantID = ""
+	settings.DeviceID = ""
+	settings.ClientInstanceID = ""
+	if err := saveAgentLocalSettings(settings); err != nil {
+		return settings, err
+	}
+	return normalizeAgentLocalSettings(settings), nil
+}
+
+func setAgentOfflineMode() (agentLocalSettings, error) {
+	settings, err := loadAgentLocalSettings()
+	if err != nil {
+		return settings, err
+	}
+	settings.Mode = "offline"
+	if err := saveAgentLocalSettings(settings); err != nil {
+		return settings, err
+	}
+	return normalizeAgentLocalSettings(settings), nil
+}
+
+func agentSettingsLoggedIn(settings agentLocalSettings) bool {
+	return strings.TrimSpace(settings.ServerURL) != "" &&
+		strings.TrimSpace(settings.TenantID) != "" &&
+		strings.TrimSpace(settings.DeviceID) != "" &&
+		strings.TrimSpace(settings.ClientInstanceID) != ""
+}
+
+func localAgentStatus(state *trayState) map[string]any {
+	settings := state.currentSettings()
+	settingsPath, _ := agentSettingsPath()
+	historyPath, _ := localHistoryPath()
+	return map[string]any{
+		"settings":      settings,
+		"logged_in":     agentSettingsLoggedIn(settings),
+		"offline":       settings.Mode != "online",
+		"settings_path": settingsPath,
+		"history_path":  historyPath,
+		"tray_addr":     trayListenAddress(),
+	}
+}
+
 func runAgentTray(args []string) {
 	noUI := false
 	readyFile := ""
@@ -447,6 +741,13 @@ func newTrayHTTPHandler(state *trayState) http.Handler {
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		writeTrayJSON(w, map[string]any{"status": "ok", "mode": state.currentSettings().Mode})
 	})
+	mux.HandleFunc("/api/local/status", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		writeTrayJSON(w, map[string]any{"data": localAgentStatus(state)})
+	})
 	mux.HandleFunc("/api/local/settings", func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
@@ -468,6 +769,50 @@ func newTrayHTTPHandler(state *trayState) http.Handler {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		}
 	})
+	mux.HandleFunc("/api/local/login", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var req agentLoginOptions
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		settings, err := configureAgentDesktopLogin(req)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		state.setSettings(settings)
+		writeTrayJSON(w, map[string]any{"data": localAgentStatus(state)})
+	})
+	mux.HandleFunc("/api/local/logout", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		settings, err := clearAgentDesktopLogin()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		state.setSettings(settings)
+		writeTrayJSON(w, map[string]any{"data": localAgentStatus(state)})
+	})
+	mux.HandleFunc("/api/local/offline", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		settings, err := setAgentOfflineMode()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		state.setSettings(settings)
+		writeTrayJSON(w, map[string]any{"data": localAgentStatus(state)})
+	})
 	mux.HandleFunc("/api/local/approvals/confirm", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -484,7 +829,62 @@ func newTrayHTTPHandler(state *trayState) http.Handler {
 		decision := state.confirmApproval(req)
 		writeTrayJSON(w, map[string]any{"data": decision})
 	})
+	mux.HandleFunc("/api/local/sessions", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		items, err := listLocalSessions()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeTrayJSON(w, map[string]any{"data": map[string]any{"items": items}})
+	})
+	mux.HandleFunc("/api/local/sessions/", func(w http.ResponseWriter, r *http.Request) {
+		handleTraySessionScoped(w, r)
+	})
 	return mux
+}
+
+func handleTraySessionScoped(w http.ResponseWriter, r *http.Request) {
+	parts := strings.Split(strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/local/sessions/"), "/"), "/")
+	if len(parts) == 0 || parts[0] == "" {
+		http.NotFound(w, r)
+		return
+	}
+	sessionID := parts[0]
+	if len(parts) == 1 && r.Method == http.MethodGet {
+		detail, ok, err := localSessionDetail(sessionID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if !ok {
+			http.Error(w, "session not found", http.StatusNotFound)
+			return
+		}
+		writeTrayJSON(w, map[string]any{"data": detail})
+		return
+	}
+	if len(parts) == 2 && parts[1] == "input" && r.Method == http.MethodPost {
+		var req localSessionInputRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if strings.TrimSpace(req.Text) == "" {
+			http.Error(w, "text is required", http.StatusBadRequest)
+			return
+		}
+		if err := sendLocalSessionInput(sessionID, req.Text); err != nil {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
+		writeTrayJSON(w, map[string]any{"data": map[string]any{"session_id": sessionID, "written": true}})
+		return
+	}
+	http.NotFound(w, r)
 }
 
 func (s *trayState) currentSettings() agentLocalSettings {
@@ -567,7 +967,10 @@ func setupTrayMenu(state *trayState) {
 	rejectItem := systray.AddMenuItem("拒绝当前审批", "Reject current pending approval")
 	systray.AddSeparator()
 	toggleNotify := systray.AddMenuItem("关闭提醒", "Toggle local approval notifications")
+	toggleOffline := systray.AddMenuItem("切换离线/在线模式", "Toggle offline mode when login settings are present")
+	historyItem := systray.AddMenuItem("显示历史路径", "Print local history path")
 	settingsItem := systray.AddMenuItem("显示设置路径", "Print settings path")
+	loginItem := systray.AddMenuItem("登录/切换账号", "Print login command help")
 	quitItem := systray.AddMenuItem("退出", "Quit GatePilot Agent")
 
 	refresh := func() {
@@ -581,6 +984,11 @@ func setupTrayMenu(state *trayState) {
 			toggleNotify.SetTitle("关闭提醒")
 		} else {
 			toggleNotify.SetTitle("开启提醒")
+		}
+		if settings.Mode == "online" {
+			toggleOffline.SetTitle("切换为离线使用")
+		} else {
+			toggleOffline.SetTitle("切换为在线模式")
 		}
 	}
 	refresh()
@@ -606,10 +1014,36 @@ func setupTrayMenu(state *trayState) {
 		}
 	}()
 	go func() {
+		for range toggleOffline.ClickedCh {
+			settings := state.currentSettings()
+			if settings.Mode == "online" {
+				settings.Mode = "offline"
+			} else if agentSettingsLoggedIn(settings) {
+				settings.Mode = "online"
+			}
+			if err := saveAgentLocalSettings(settings); err == nil {
+				state.setSettings(settings)
+			}
+			refresh()
+		}
+	}()
+	go func() {
+		for range historyItem.ClickedCh {
+			if path, err := localHistoryPath(); err == nil {
+				fmt.Println(path)
+			}
+		}
+	}()
+	go func() {
 		for range settingsItem.ClickedCh {
 			if path, err := agentSettingsPath(); err == nil {
 				fmt.Println(path)
 			}
+		}
+	}()
+	go func() {
+		for range loginItem.ClickedCh {
+			fmt.Println("gatepilot-agent.exe login --server-url <url> --tenant-id <tenant_id> --device-id <device_id>")
 		}
 	}()
 	go func() {
@@ -723,7 +1157,149 @@ func currentWorkingDir() string {
 	return wd
 }
 
-func confirmLocalApproval(writer io.Writer, cliAdapter adapter.CLIAdapter, event adapter.DetectedEvent, options localUIOptions, reader io.Reader, output io.Writer) (string, int, error) {
+func printLocalHistory(args []string) {
+	sessionID := ""
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--session-id":
+			if i+1 < len(args) {
+				sessionID = args[i+1]
+				i++
+			}
+		}
+	}
+	if sessionID != "" {
+		detail, ok, err := localSessionDetail(sessionID)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		if !ok {
+			fmt.Fprintf(os.Stderr, "session %s not found\n", sessionID)
+			os.Exit(1)
+		}
+		fmt.Println(mustJSON(map[string]any{"data": detail}))
+		return
+	}
+	items, err := listLocalSessions()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	fmt.Println(mustJSON(map[string]any{"data": map[string]any{"items": items}}))
+}
+
+type localSessionHost struct {
+	sessionID string
+	addr      string
+	server    *http.Server
+	writer    io.Writer
+	mu        sync.Mutex
+}
+
+func startLocalSessionHost(sessionID string, writer io.Writer) (*localSessionHost, error) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return nil, err
+	}
+	host := &localSessionHost{
+		sessionID: sessionID,
+		addr:      listener.Addr().String(),
+		writer:    writer,
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/input", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var req localSessionInputRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if strings.TrimSpace(req.Text) == "" {
+			http.Error(w, "text is required", http.StatusBadRequest)
+			return
+		}
+		host.mu.Lock()
+		n, err := host.writer.Write([]byte(req.Text + "\r"))
+		host.mu.Unlock()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		_ = appendLocalDecision(localDecisionRecord{
+			ApprovalID:      "manual_input",
+			SessionID:       sessionID,
+			DecisionType:    "reply",
+			PayloadRedacted: req.Text,
+			BytesWritten:    n,
+			Result:          "manual_input",
+			CreatedAt:       time.Now().UTC().Format(time.RFC3339),
+		})
+		writeTrayJSON(w, map[string]any{"data": map[string]any{"bytes_written": n}})
+	})
+	host.server = &http.Server{Handler: mux}
+	go func() {
+		if err := host.server.Serve(listener); err != nil && err != http.ErrServerClosed {
+			fmt.Fprintf(os.Stderr, "local session host stopped: %v\n", err)
+		}
+	}()
+	return host, nil
+}
+
+func (h *localSessionHost) Close() error {
+	if h == nil || h.server == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	return h.server.Shutdown(ctx)
+}
+
+func localHostAddress(host *localSessionHost) string {
+	if host == nil {
+		return ""
+	}
+	return host.addr
+}
+
+func sendLocalSessionInput(sessionID string, text string) error {
+	detail, ok, err := localSessionDetail(sessionID)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("session not found")
+	}
+	session, ok := detail["session"].(localSessionRecord)
+	if !ok {
+		return fmt.Errorf("session detail invalid")
+	}
+	if session.Status != "running" && session.Status != "waiting_approval" {
+		return fmt.Errorf("session is not running")
+	}
+	if session.ControlAddr == "" {
+		return fmt.Errorf("session control is unavailable")
+	}
+	body, err := json.Marshal(localSessionInputRequest{Text: text})
+	if err != nil {
+		return err
+	}
+	resp, err := http.Post("http://"+session.ControlAddr+"/input", "application/json", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 300 {
+		return fmt.Errorf("%s: %s", resp.Status, string(respBody))
+	}
+	return nil
+}
+
+func confirmLocalApproval(writer io.Writer, cliAdapter adapter.CLIAdapter, event adapter.DetectedEvent, options localUIOptions, reader io.Reader, output io.Writer) (string, int, string, string, error) {
 	approval := localApproval{
 		ApprovalID:    "local",
 		TenantID:      "local",
@@ -750,7 +1326,7 @@ func confirmLocalApproval(writer io.Writer, cliAdapter adapter.CLIAdapter, event
 	}
 	decisionType, payload, err := localDecisionInput(options, reader, output)
 	if err != nil {
-		return "write_failed", 0, err
+		return "write_failed", 0, "", "", err
 	}
 	decisionInput, err := cliAdapter.BuildDecisionInput(adapter.ApprovalEvent{
 		EventType:     event.EventType,
@@ -761,18 +1337,18 @@ func confirmLocalApproval(writer io.Writer, cliAdapter adapter.CLIAdapter, event
 		Payload: payload,
 	})
 	if err != nil {
-		return "write_failed", 0, err
+		return "write_failed", 0, decisionType, payload, err
 	}
 	n, err := writer.Write(decisionInput)
 	if err != nil {
-		return "write_failed", n, err
+		return "write_failed", n, decisionType, payload, err
 	}
 	fmt.Fprintln(output, mustJSON(map[string]any{
 		"type":          "local_only.decision_written",
 		"decision_type": decisionType,
 		"bytes_written": n,
 	}))
-	return "written", n, nil
+	return "written", n, decisionType, payload, nil
 }
 
 func detectApprovalFromReader(reader io.Reader, cliAdapter adapter.CLIAdapter) (adapter.DetectedEvent, string, error) {

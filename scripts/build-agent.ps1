@@ -42,6 +42,11 @@ Offline local confirmation:
 .\gatepilot-agent.exe run --local-only -- fake-ai-cli
 .\gatepilot-agent.exe run --local-only --decision approve -- fake-ai-cli
 .\gatepilot-agent.exe run --local-only --popup -- fake-ai-cli
+.\gatepilot-agent.exe status
+.\gatepilot-agent.exe history
+.\gatepilot-agent.exe login --server-url <url> --tenant-id <tenant_id> --device-id <device_id>
+.\gatepilot-agent.exe offline
+.\gatepilot-agent.exe logout
 ```
 
 Server-backed local UI:
