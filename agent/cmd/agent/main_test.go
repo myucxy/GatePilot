@@ -149,6 +149,15 @@ func TestReadDecisionLineAcceptsCarriageReturn(t *testing.T) {
 	}
 }
 
+func TestDeliveryInputTypeMapsPolicyDecisions(t *testing.T) {
+	if got := deliveryInputType("policy_approve"); got != "approve" {
+		t.Fatalf("policy approve maps to %q, want approve", got)
+	}
+	if got := deliveryInputType("policy_reject"); got != "reject" {
+		t.Fatalf("policy reject maps to %q, want reject", got)
+	}
+}
+
 func TestFlushQueuedApprovalsPostsAndRemovesEvents(t *testing.T) {
 	queuePath := filepath.Join(t.TempDir(), "queue.jsonl")
 	t.Setenv("GATEPILOT_AGENT_QUEUE", queuePath)

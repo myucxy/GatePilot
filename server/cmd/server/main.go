@@ -95,6 +95,24 @@ type approval struct {
 	ExpiresAt        string            `json:"expires_at"`
 }
 
+type policyRule struct {
+	PolicyRuleID    string `json:"policy_rule_id"`
+	TenantID        string `json:"tenant_id"`
+	Name            string `json:"name"`
+	Scope           string `json:"scope"`
+	Priority        int    `json:"priority"`
+	Enabled         bool   `json:"enabled"`
+	CLIType         string `json:"cli_type"`
+	EventType       string `json:"event_type"`
+	RiskLevel       string `json:"risk_level"`
+	CommandPattern  string `json:"command_pattern"`
+	Decision        string `json:"decision"`
+	Reason          string `json:"reason"`
+	CreatedByUserID string `json:"created_by_user_id"`
+	CreatedAt       string `json:"created_at"`
+	UpdatedAt       string `json:"updated_at"`
+}
+
 type clientInstance struct {
 	ClientInstanceID string `json:"client_instance_id"`
 	TenantID         string `json:"tenant_id"`
@@ -244,6 +262,19 @@ type registerPushTokenRequest struct {
 	Token    string `json:"token"`
 }
 
+type createPolicyRuleRequest struct {
+	Name           string `json:"name"`
+	Scope          string `json:"scope"`
+	Priority       int    `json:"priority"`
+	Enabled        *bool  `json:"enabled"`
+	CLIType        string `json:"cli_type"`
+	EventType      string `json:"event_type"`
+	RiskLevel      string `json:"risk_level"`
+	CommandPattern string `json:"command_pattern"`
+	Decision       string `json:"decision"`
+	Reason         string `json:"reason"`
+}
+
 type createOutputChunkRequest struct {
 	DeviceID        string `json:"device_id"`
 	SessionID       string `json:"session_id"`
@@ -286,6 +317,8 @@ type gatePilotStore interface {
 	RevokeDeviceGrant(deviceID string, grantID string, revokedBy string, now time.Time) (deviceGrant, *appError)
 	CanApproveDevice(tenantID string, deviceID string, userID string) bool
 	RegisterPushToken(clientInstanceID string, req registerPushTokenRequest, now time.Time) (clientInstance, *appError)
+	CreatePolicyRule(tenantID string, req createPolicyRuleRequest, createdBy string, now time.Time) (policyRule, *appError)
+	ListPolicyRules(tenantID string) []policyRule
 	ExpireApprovals(now time.Time) []approval
 	RetryDeliveries(now time.Time, ackTimeout time.Duration, maxAttempts int) ([]approval, []approval)
 	MarkStaleDevices(now time.Time, suspectAfter time.Duration, offlineAfter time.Duration) []device
@@ -316,6 +349,7 @@ type memoryStore struct {
 	deviceGrants             map[string]deviceGrant
 	auditLogs                []auditLog
 	outputChunks             map[string]map[int64]outputChunk
+	policyRules              map[string]policyRule
 	nextOutputChunkID        int64
 	devices                  map[string]device
 	sessions                 map[string]session
@@ -336,6 +370,7 @@ func newMemoryStore() *memoryStore {
 		deviceGrants:             map[string]deviceGrant{},
 		auditLogs:                []auditLog{},
 		outputChunks:             map[string]map[int64]outputChunk{},
+		policyRules:              map[string]policyRule{},
 		nextOutputChunkID:        1,
 		devices:                  map[string]device{},
 		sessions:                 map[string]session{},
@@ -356,6 +391,7 @@ func (s *memoryStore) Reset() {
 	s.deviceGrants = map[string]deviceGrant{}
 	s.auditLogs = []auditLog{}
 	s.outputChunks = map[string]map[int64]outputChunk{}
+	s.policyRules = map[string]policyRule{}
 	s.nextOutputChunkID = 1
 	s.devices = map[string]device{}
 	s.sessions = map[string]session{}
@@ -466,6 +502,131 @@ func (s *memoryStore) RegisterPushToken(clientInstanceID string, req registerPus
 	item.LastSeenAt = now.Format(time.RFC3339)
 	s.clientInstances[clientInstanceID] = item
 	return item, nil
+}
+
+func (s *memoryStore) CreatePolicyRule(tenantID string, req createPolicyRuleRequest, createdBy string, now time.Time) (policyRule, *appError) {
+	item, appErr := buildPolicyRule(tenantID, req, createdBy, now)
+	if appErr != nil {
+		return policyRule{}, appErr
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.policyRules[item.PolicyRuleID] = item
+	return item, nil
+}
+
+func (s *memoryStore) ListPolicyRules(tenantID string) []policyRule {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	items := []policyRule{}
+	for _, item := range s.policyRules {
+		if item.TenantID == tenantID {
+			items = append(items, item)
+		}
+	}
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].Priority == items[j].Priority {
+			return items[i].CreatedAt < items[j].CreatedAt
+		}
+		return items[i].Priority < items[j].Priority
+	})
+	return items
+}
+
+func buildPolicyRule(tenantID string, req createPolicyRuleRequest, createdBy string, now time.Time) (policyRule, *appError) {
+	if req.Name == "" {
+		return policyRule{}, &appError{HTTPStatus: http.StatusBadRequest, Code: "message_schema_invalid", Message: "name is required"}
+	}
+	if req.Scope == "" {
+		req.Scope = "tenant"
+	}
+	if req.Scope != "tenant" && req.Scope != "user" {
+		return policyRule{}, &appError{HTTPStatus: http.StatusBadRequest, Code: "message_schema_invalid", Message: "scope must be tenant or user"}
+	}
+	if req.Decision == "" {
+		req.Decision = "manual"
+	}
+	switch req.Decision {
+	case "manual", "auto_reject", "auto_approve":
+	default:
+		return policyRule{}, &appError{HTTPStatus: http.StatusBadRequest, Code: "message_schema_invalid", Message: "decision must be manual, auto_reject, or auto_approve"}
+	}
+	enabled := true
+	if req.Enabled != nil {
+		enabled = *req.Enabled
+	}
+	if req.Priority == 0 {
+		req.Priority = 100
+	}
+	return policyRule{
+		PolicyRuleID:    randomUUID(),
+		TenantID:        tenantID,
+		Name:            req.Name,
+		Scope:           req.Scope,
+		Priority:        req.Priority,
+		Enabled:         enabled,
+		CLIType:         req.CLIType,
+		EventType:       req.EventType,
+		RiskLevel:       req.RiskLevel,
+		CommandPattern:  req.CommandPattern,
+		Decision:        req.Decision,
+		Reason:          req.Reason,
+		CreatedByUserID: createdBy,
+		CreatedAt:       now.Format(time.RFC3339),
+		UpdatedAt:       now.Format(time.RFC3339),
+	}, nil
+}
+
+func policyRuleMatches(rule policyRule, item approval) bool {
+	if !rule.Enabled {
+		return false
+	}
+	if rule.CLIType != "" && rule.CLIType != item.CLIType {
+		return false
+	}
+	if rule.EventType != "" && rule.EventType != item.EventType {
+		return false
+	}
+	if rule.RiskLevel != "" && rule.RiskLevel != item.RiskLevel {
+		return false
+	}
+	if rule.CommandPattern != "" {
+		text := strings.ToLower(item.PromptText + "\n" + item.ContextBefore)
+		if !strings.Contains(text, strings.ToLower(rule.CommandPattern)) {
+			return false
+		}
+	}
+	return true
+}
+
+func applyPolicyDecision(item approval, rule policyRule, now time.Time) approval {
+	switch rule.Decision {
+	case "auto_reject":
+		item.Status = "delivering"
+		item.DecisionType = "policy_reject"
+		item.DecisionPayload = firstNonEmpty(rule.Reason, "policy auto reject")
+	case "auto_approve":
+		if item.RiskLevel == "high" || item.RiskLevel == "critical" {
+			return item
+		}
+		item.Status = "delivering"
+		item.DecisionType = "policy_approve"
+		item.DecisionPayload = firstNonEmpty(rule.Reason, "policy auto approve")
+	default:
+		return item
+	}
+	item.DeliveryID = randomUUID()
+	item.DeliveryStatus = "sent"
+	item.DeliveryAttempts = 1
+	item.DeliverySentAt = now.Format(time.RFC3339)
+	item.DecidedBy = map[string]string{
+		"actor_type":   "policy",
+		"actor_id":     rule.PolicyRuleID,
+		"display_name": rule.Name,
+		"client_type":  "policy",
+	}
+	item.DecidedAt = now.Format(time.RFC3339)
+	return item
 }
 
 func (s *memoryStore) CreateActivationCode(tenantID string, req createActivationCodeRequest, idempotencyKey string, now time.Time) (string, time.Time, *appError) {
@@ -693,14 +854,40 @@ func (s *memoryStore) CreateApproval(req createAgentApprovalRequest, now time.Ti
 		CreatedAt:      now.Format(time.RFC3339),
 		ExpiresAt:      now.Add(time.Duration(req.ExpiresIn) * time.Second).Format(time.RFC3339),
 	}
+	rules := make([]policyRule, 0, len(s.policyRules))
+	for _, rule := range s.policyRules {
+		if rule.TenantID == sessionItem.TenantID {
+			rules = append(rules, rule)
+		}
+	}
+	sort.Slice(rules, func(i, j int) bool {
+		if rules[i].Priority == rules[j].Priority {
+			return rules[i].CreatedAt < rules[j].CreatedAt
+		}
+		return rules[i].Priority < rules[j].Priority
+	})
+	for _, rule := range rules {
+		if policyRuleMatches(rule, item) {
+			next := applyPolicyDecision(item, rule, now)
+			if next.Status != item.Status || next.DecisionType != item.DecisionType || rule.Decision == "manual" {
+				item = next
+				break
+			}
+		}
+	}
 	s.approvals[approvalID] = item
-	for _, client := range s.clientInstances {
-		if client.TenantID == sessionItem.TenantID && client.Status == "active" {
-			s.approvalNotifications[approvalID] = append(s.approvalNotifications[approvalID], client.ClientInstanceID)
+	if item.Status == "waiting_decision" {
+		for _, client := range s.clientInstances {
+			if client.TenantID == sessionItem.TenantID && client.Status == "active" {
+				s.approvalNotifications[approvalID] = append(s.approvalNotifications[approvalID], client.ClientInstanceID)
+			}
 		}
 	}
 	sessionItem.Status = "waiting_approval"
 	sessionItem.PendingApprovals++
+	if item.Status == "delivering" {
+		sessionItem.LastOutputSummary = "approval " + item.DecisionType + " delivering"
+	}
 	s.sessions[req.SessionID] = sessionItem
 	return item, nil
 }
@@ -1869,6 +2056,10 @@ func tenantScopedHandler(w http.ResponseWriter, r *http.Request) {
 		listApprovalsHandler(w, r, tenantID)
 	case resource == "audit-logs" && r.Method == http.MethodGet:
 		listAuditLogsHandler(w, r, tenantID)
+	case resource == "policy-rules" && r.Method == http.MethodGet:
+		listPolicyRulesHandler(w, r, tenantID)
+	case resource == "policy-rules" && r.Method == http.MethodPost:
+		createPolicyRuleHandler(w, r, tenantID)
 	default:
 		http.NotFound(w, r)
 	}
@@ -2024,6 +2215,10 @@ func agentApprovalsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	pushApprovalCreatedToClients(item)
+	if item.Status == "delivering" {
+		pushApprovalDecisionToAgent(item)
+		pushApprovalUpdatedToClients(item)
+	}
 	if sessionItem, appErr := store.GetSession(item.SessionID); appErr == nil {
 		pushSessionUpdatedToClients(sessionItem)
 	}
@@ -2068,6 +2263,58 @@ func listAuditLogsHandler(w http.ResponseWriter, r *http.Request, tenantID strin
 			"next_cursor": nil,
 			"has_more":    false,
 		},
+		RequestID: requestID(r),
+		TraceID:   traceID(r),
+	})
+}
+
+func listPolicyRulesHandler(w http.ResponseWriter, r *http.Request, tenantID string) {
+	if devRole(r) != "owner" && devRole(r) != "admin" {
+		writeError(w, r, http.StatusForbidden, "role_insufficient", "role cannot view policy rules")
+		return
+	}
+	writeJSON(w, envelope{
+		Data: map[string]any{
+			"items":       store.ListPolicyRules(tenantID),
+			"next_cursor": nil,
+			"has_more":    false,
+		},
+		RequestID: requestID(r),
+		TraceID:   traceID(r),
+	})
+}
+
+func createPolicyRuleHandler(w http.ResponseWriter, r *http.Request, tenantID string) {
+	if devRole(r) != "owner" && devRole(r) != "admin" {
+		writeError(w, r, http.StatusForbidden, "role_insufficient", "role cannot manage policy rules")
+		return
+	}
+	var req createPolicyRuleRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, r, http.StatusBadRequest, "message_schema_invalid", err.Error())
+		return
+	}
+	item, appErr := store.CreatePolicyRule(tenantID, req, devUserID(r), time.Now().UTC())
+	if appErr != nil {
+		writeAppError(w, r, appErr)
+		return
+	}
+	store.AppendAuditLog(auditLog{
+		TenantID:     item.TenantID,
+		ActorType:    "user",
+		ActorID:      devUserID(r),
+		Action:       "policy_rule.create",
+		ResourceType: "policy_rule",
+		ResourceID:   item.PolicyRuleID,
+		Result:       "success",
+		TraceID:      traceID(r),
+		Detail: map[string]any{
+			"decision": item.Decision,
+			"priority": item.Priority,
+		},
+	}, time.Now().UTC())
+	writeStatusJSON(w, http.StatusCreated, envelope{
+		Data:      item,
 		RequestID: requestID(r),
 		TraceID:   traceID(r),
 	})

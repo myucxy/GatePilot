@@ -138,6 +138,78 @@ RETURNING id::text, tenant_id::text, user_id::text, client_type, COALESCE(device
 	return item, nil
 }
 
+func (s *postgresStore) CreatePolicyRule(tenantID string, req createPolicyRuleRequest, createdBy string, now time.Time) (policyRule, *appError) {
+	item, appErr := buildPolicyRule(tenantID, req, createdBy, now)
+	if appErr != nil {
+		return policyRule{}, appErr
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return policyRule{}, internalStoreError(err)
+	}
+	defer tx.Rollback()
+	if err := ensureTenant(ctx, tx, tenantID); err != nil {
+		return policyRule{}, internalStoreError(err)
+	}
+	_, err = tx.ExecContext(ctx, `
+INSERT INTO policy_rules(id, tenant_id, name, scope, priority, enabled, cli_type, event_type, risk_level, command_pattern, decision, reason, created_by_user_id, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $14)`,
+		item.PolicyRuleID, item.TenantID, item.Name, item.Scope, item.Priority, item.Enabled, item.CLIType, item.EventType, item.RiskLevel, item.CommandPattern, item.Decision, item.Reason, nullableUUID(item.CreatedByUserID), now)
+	if err != nil {
+		return policyRule{}, internalStoreError(err)
+	}
+	if err := tx.Commit(); err != nil {
+		return policyRule{}, internalStoreError(err)
+	}
+	return item, nil
+}
+
+func (s *postgresStore) ListPolicyRules(tenantID string) []policyRule {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	rows, err := s.db.QueryContext(ctx, `
+SELECT id::text, tenant_id::text, name, scope, priority, enabled, cli_type, event_type, risk_level, command_pattern, decision, reason, COALESCE(created_by_user_id::text, ''), created_at, updated_at
+FROM policy_rules
+WHERE tenant_id = $1
+ORDER BY priority ASC, created_at ASC`, tenantID)
+	if err != nil {
+		return []policyRule{}
+	}
+	defer rows.Close()
+	items := []policyRule{}
+	for rows.Next() {
+		item, err := scanPolicyRule(rows)
+		if err != nil {
+			return []policyRule{}
+		}
+		items = append(items, item)
+	}
+	return items
+}
+
+func listPolicyRulesTx(ctx context.Context, tx *sql.Tx, tenantID string) ([]policyRule, error) {
+	rows, err := tx.QueryContext(ctx, `
+SELECT id::text, tenant_id::text, name, scope, priority, enabled, cli_type, event_type, risk_level, command_pattern, decision, reason, COALESCE(created_by_user_id::text, ''), created_at, updated_at
+FROM policy_rules
+WHERE tenant_id = $1 AND enabled = true
+ORDER BY priority ASC, created_at ASC`, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []policyRule{}
+	for rows.Next() {
+		item, err := scanPolicyRule(rows)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
 func (s *postgresStore) UpdateClientInstance(clientInstanceID string, req updateClientInstanceRequest, now time.Time) (clientInstance, *appError) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -574,28 +646,68 @@ FOR UPDATE`, req.SessionID, req.DeviceID).Scan(&tenantID, &cliType)
 		CreatedAt:      now.Format(time.RFC3339),
 		ExpiresAt:      now.Add(time.Duration(req.ExpiresIn) * time.Second).Format(time.RFC3339),
 	}
-	expiresAt, _ := time.Parse(time.RFC3339, item.ExpiresAt)
-
-	_, err = tx.ExecContext(ctx, `
-INSERT INTO approval_requests(id, tenant_id, device_id, session_id, idempotency_key, cli_type, event_type, risk_level, prompt_text, context_before, status, expires_at, created_at, updated_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $13)`,
-		item.ApprovalID, item.TenantID, item.DeviceID, item.SessionID, req.IdempotencyKey, item.CLIType, item.EventType, item.RiskLevel, item.PromptText, item.ContextBefore, item.Status, expiresAt, now)
+	rules, err := listPolicyRulesTx(ctx, tx, tenantID)
 	if err != nil {
 		return approval{}, internalStoreError(err)
 	}
+	for _, rule := range rules {
+		if policyRuleMatches(rule, item) {
+			next := applyPolicyDecision(item, rule, now)
+			if next.Status != item.Status || next.DecisionType != item.DecisionType || rule.Decision == "manual" {
+				item = next
+				break
+			}
+		}
+	}
+	expiresAt, _ := time.Parse(time.RFC3339, item.ExpiresAt)
+	decidedByJSON, err := json.Marshal(item.DecidedBy)
+	if err != nil {
+		return approval{}, internalStoreError(err)
+	}
+	var decidedAt any
+	if item.DecidedAt != "" {
+		parsed, _ := time.Parse(time.RFC3339, item.DecidedAt)
+		decidedAt = parsed
+	}
+
 	_, err = tx.ExecContext(ctx, `
+INSERT INTO approval_requests(id, tenant_id, device_id, session_id, idempotency_key, cli_type, event_type, risk_level, prompt_text, context_before, status, decision_type, decision_payload, decided_by, decided_at, expires_at, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::jsonb, $15, $16, $17, $17)`,
+		item.ApprovalID, item.TenantID, item.DeviceID, item.SessionID, req.IdempotencyKey, item.CLIType, item.EventType, item.RiskLevel, item.PromptText, item.ContextBefore, item.Status, item.DecisionType, item.DecisionPayload, string(decidedByJSON), decidedAt, expiresAt, now)
+	if err != nil {
+		return approval{}, internalStoreError(err)
+	}
+	if item.Status == "waiting_decision" {
+		_, err = tx.ExecContext(ctx, `
 INSERT INTO approval_notifications(id, tenant_id, approval_id, client_instance_id, user_id, client_type, channel, status, created_at)
 SELECT gen_random_uuid(), $1, $2, id, user_id, client_type, 'websocket', 'pending', $3
 FROM client_instances
 WHERE tenant_id = $1 AND status = 'active'`,
-		item.TenantID, item.ApprovalID, now)
-	if err != nil {
-		return approval{}, internalStoreError(err)
+			item.TenantID, item.ApprovalID, now)
+		if err != nil {
+			return approval{}, internalStoreError(err)
+		}
+	}
+	if item.Status == "delivering" {
+		_, err = tx.ExecContext(ctx, `
+INSERT INTO approval_deliveries(id, tenant_id, approval_id, device_id, session_id, decision_type, decision_payload, status, attempt_count, sent_at, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, 'sent', 1, $8, $8, $8)`,
+			item.DeliveryID, item.TenantID, item.ApprovalID, item.DeviceID, item.SessionID, item.DecisionType, item.DecisionPayload, now)
+		if err != nil {
+			return approval{}, internalStoreError(err)
+		}
 	}
 	_, err = tx.ExecContext(ctx, `
 UPDATE sessions
-SET status = 'waiting_approval', pending_approval_count = pending_approval_count + 1
-WHERE id = $1`, req.SessionID)
+SET status = 'waiting_approval',
+    pending_approval_count = pending_approval_count + 1,
+    last_output_summary = CASE WHEN $2 = '' THEN last_output_summary ELSE $2 END
+WHERE id = $1`, req.SessionID, func() string {
+		if item.Status == "delivering" {
+			return "approval " + item.DecisionType + " delivering"
+		}
+		return ""
+	}())
 	if err != nil {
 		return approval{}, internalStoreError(err)
 	}
@@ -1787,6 +1899,22 @@ type deviceScanner interface {
 
 type clientInstanceScanner interface {
 	Scan(dest ...any) error
+}
+
+type policyRuleScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanPolicyRule(scanner policyRuleScanner) (policyRule, error) {
+	var item policyRule
+	var createdAt, updatedAt time.Time
+	err := scanner.Scan(&item.PolicyRuleID, &item.TenantID, &item.Name, &item.Scope, &item.Priority, &item.Enabled, &item.CLIType, &item.EventType, &item.RiskLevel, &item.CommandPattern, &item.Decision, &item.Reason, &item.CreatedByUserID, &createdAt, &updatedAt)
+	if err != nil {
+		return policyRule{}, err
+	}
+	item.CreatedAt = createdAt.Format(time.RFC3339)
+	item.UpdatedAt = updatedAt.Format(time.RFC3339)
+	return item, nil
 }
 
 func scanClientInstance(scanner clientInstanceScanner) (clientInstance, error) {

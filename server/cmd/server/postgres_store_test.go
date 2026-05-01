@@ -77,6 +77,29 @@ func TestPostgresApprovalSupersedeCancelsWaitingDecision(t *testing.T) {
 	}
 }
 
+func TestPostgresPolicyRuleAutoRejectCreatesDelivery(t *testing.T) {
+	withPostgresTestStore(t)
+
+	server := httptest.NewServer(newRouter())
+	defer server.Close()
+
+	postJSON(t, server.URL+"/api/v1/tenants/"+testTenantID+"/policy-rules", map[string]any{
+		"name":            "postgres reject fake command",
+		"priority":        1,
+		"command_pattern": "allow command",
+		"decision":        "auto_reject",
+		"reason":          "postgres policy",
+	}, http.StatusCreated)
+	code := createTestActivationCode(t, server.URL)
+	deviceID := registerTestDevice(t, server.URL, code)
+	sessionID := createTestSession(t, server.URL, deviceID)
+	body := createTestApprovalBody(t, server.URL, deviceID, sessionID, randomUUID())
+	data := body["data"].(map[string]any)
+	if data["status"] != "delivering" || data["decision_type"] != "policy_reject" || data["delivery_status"] != "sent" {
+		t.Fatalf("postgres policy approval = %v, want delivering policy reject", data)
+	}
+}
+
 func withPostgresTestStore(t *testing.T) {
 	t.Helper()
 	databaseURL := os.Getenv("GATEPILOT_POSTGRES_TEST_DATABASE_URL")

@@ -756,6 +756,53 @@ paths:
                         $ref: "#/components/schemas/AuditLogListResponse"
         "403":
           $ref: "#/components/responses/ErrorResponse"
+  /tenants/{tenant_id}/policy-rules:
+    get:
+      operationId: listPolicyRules
+      summary: List policy rules in a tenant
+      parameters:
+        - $ref: "#/components/parameters/TenantId"
+      responses:
+        "200":
+          description: Policy rule list
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/PolicyRuleListResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+    post:
+      operationId: createPolicyRule
+      summary: Create a policy rule
+      parameters:
+        - $ref: "#/components/parameters/TenantId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreatePolicyRuleRequest"
+      responses:
+        "201":
+          description: Policy rule created
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/PolicyRule"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
   /approvals/{approval_id}/decision:
     post:
       operationId: submitApprovalDecision
@@ -1619,6 +1666,103 @@ components:
               format: uuid
             client_type:
               type: string
+    CreatePolicyRuleRequest:
+      type: object
+      required:
+        - name
+        - decision
+      properties:
+        name:
+          type: string
+        scope:
+          type: string
+          enum:
+            - tenant
+            - user
+        priority:
+          type: integer
+        enabled:
+          type: boolean
+        cli_type:
+          type: string
+        event_type:
+          type: string
+        risk_level:
+          type: string
+        command_pattern:
+          type: string
+        decision:
+          type: string
+          enum:
+            - manual
+            - auto_reject
+            - auto_approve
+        reason:
+          type: string
+    PolicyRule:
+      type: object
+      required:
+        - policy_rule_id
+        - tenant_id
+        - name
+        - scope
+        - priority
+        - enabled
+        - decision
+        - created_at
+        - updated_at
+      properties:
+        policy_rule_id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        scope:
+          type: string
+        priority:
+          type: integer
+        enabled:
+          type: boolean
+        cli_type:
+          type: string
+        event_type:
+          type: string
+        risk_level:
+          type: string
+        command_pattern:
+          type: string
+        decision:
+          type: string
+        reason:
+          type: string
+        created_by_user_id:
+          type: string
+          format: uuid
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    PolicyRuleListResponse:
+      type: object
+      required:
+        - items
+        - next_cursor
+        - has_more
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/PolicyRule"
+        next_cursor:
+          type: string
+          nullable: true
+        has_more:
+          type: boolean
     AuditLog:
       type: object
       required:

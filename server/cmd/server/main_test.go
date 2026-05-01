@@ -217,6 +217,49 @@ func TestApprovalSupersedeCancelsWaitingDecision(t *testing.T) {
 	}
 }
 
+func TestPolicyRuleAutoRejectCreatesDelivery(t *testing.T) {
+	resetTestStore()
+	server := httptest.NewServer(newRouter())
+	defer server.Close()
+
+	postJSON(t, server.URL+"/api/v1/tenants/"+testTenantID+"/policy-rules", map[string]any{
+		"name":            "reject fake command",
+		"priority":        1,
+		"command_pattern": "allow command",
+		"decision":        "auto_reject",
+		"reason":          "test policy",
+	}, http.StatusCreated)
+	code := createTestActivationCode(t, server.URL)
+	deviceID := registerTestDevice(t, server.URL, code)
+	sessionID := createTestSession(t, server.URL, deviceID)
+	body := createTestApprovalBody(t, server.URL, deviceID, sessionID, randomUUID())
+	data := body["data"].(map[string]any)
+	if data["status"] != "delivering" || data["decision_type"] != "policy_reject" || data["delivery_status"] != "sent" {
+		t.Fatalf("policy approval = %v, want delivering policy reject", data)
+	}
+}
+
+func TestPolicyRuleAutoApproveHighRiskFallsBackManual(t *testing.T) {
+	resetTestStore()
+	server := httptest.NewServer(newRouter())
+	defer server.Close()
+
+	postJSON(t, server.URL+"/api/v1/tenants/"+testTenantID+"/policy-rules", map[string]any{
+		"name":            "unsafe approve",
+		"priority":        1,
+		"command_pattern": "allow command",
+		"decision":        "auto_approve",
+	}, http.StatusCreated)
+	code := createTestActivationCode(t, server.URL)
+	deviceID := registerTestDevice(t, server.URL, code)
+	sessionID := createTestSession(t, server.URL, deviceID)
+	body := createTestApprovalBody(t, server.URL, deviceID, sessionID, randomUUID())
+	data := body["data"].(map[string]any)
+	if data["status"] != "waiting_decision" || data["decision_type"] != "" {
+		t.Fatalf("policy approval = %v, want manual high-risk fallback", data)
+	}
+}
+
 func TestAuditLogsCaptureDecisionAndAck(t *testing.T) {
 	resetTestStore()
 	server := httptest.NewServer(newRouter())

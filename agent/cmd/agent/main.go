@@ -378,7 +378,7 @@ func waitForDelivery(conn *websocket.Conn, traceID string) {
 			os.Exit(1)
 		}
 		decisionInput, err := adapter.ForCLI("custom").BuildDecisionInput(adapter.ApprovalEvent{}, adapter.Decision{
-			Type:    delivery.DecisionType,
+			Type:    deliveryInputType(delivery.DecisionType),
 			Payload: stringValue(delivery.Payload),
 		})
 		if err != nil {
@@ -417,6 +417,17 @@ func waitForDelivery(conn *websocket.Conn, traceID string) {
 			"ack_result":  ackResult,
 		}))
 		return
+	}
+}
+
+func deliveryInputType(decisionType string) string {
+	switch decisionType {
+	case "policy_approve":
+		return "approve"
+	case "policy_reject", "timeout_reject":
+		return "reject"
+	default:
+		return decisionType
 	}
 }
 
