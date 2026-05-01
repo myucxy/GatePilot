@@ -212,6 +212,13 @@ type ackApprovalDecisionRequest struct {
 	Detail     map[string]any `json:"detail"`
 }
 
+type supersedeApprovalRequest struct {
+	ApprovalID string         `json:"approval_id"`
+	SessionID  string         `json:"session_id"`
+	Reason     string         `json:"reason"`
+	Detail     map[string]any `json:"detail"`
+}
+
 type registerClientInstanceRequest struct {
 	TenantID    string `json:"tenant_id"`
 	ClientType  string `json:"client_type"`
@@ -273,6 +280,7 @@ type gatePilotStore interface {
 	ListApprovals(tenantID string, status string) []approval
 	SubmitApprovalDecision(approvalID string, req submitApprovalDecisionRequest, idempotencyKey string, decidedBy map[string]string, now time.Time) (approval, *appError)
 	AckApprovalDecision(req ackApprovalDecisionRequest) (map[string]any, *appError)
+	SupersedeApproval(req supersedeApprovalRequest, now time.Time) (approval, *appError)
 	CreateDeviceGrant(deviceID string, req createDeviceGrantRequest, grantedBy string, now time.Time) (deviceGrant, *appError)
 	ListDeviceGrants(deviceID string) []deviceGrant
 	RevokeDeviceGrant(deviceID string, grantID string, revokedBy string, now time.Time) (deviceGrant, *appError)
@@ -816,6 +824,51 @@ func (s *memoryStore) AckApprovalDecision(req ackApprovalDecisionRequest) (map[s
 	return approvalAckData(item), nil
 }
 
+func (s *memoryStore) SupersedeApproval(req supersedeApprovalRequest, now time.Time) (approval, *appError) {
+	if req.Reason == "" {
+		req.Reason = "local_input"
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	item, ok := s.approvals[req.ApprovalID]
+	if !ok {
+		return approval{}, &appError{HTTPStatus: http.StatusNotFound, Code: "approval_not_found", Message: "approval not found"}
+	}
+	if req.SessionID != "" && item.SessionID != req.SessionID {
+		return approval{}, &appError{HTTPStatus: http.StatusConflict, Code: "approval_session_mismatch", Message: "approval does not belong to session"}
+	}
+	if item.Status == "cancelled_by_local_input" {
+		return item, nil
+	}
+	if item.Status != "waiting_decision" {
+		return approval{}, &appError{HTTPStatus: http.StatusConflict, Code: "approval_already_decided", Message: "approval already decided"}
+	}
+
+	item.Status = "cancelled_by_local_input"
+	item.DecisionType = "local_input"
+	item.DecisionPayload = req.Reason
+	item.DeliveryStatus = "cancelled"
+	item.DecidedBy = map[string]string{
+		"actor_type":   "local",
+		"actor_id":     item.DeviceID,
+		"display_name": "Agent local input",
+		"client_type":  "agent",
+	}
+	item.DecidedAt = now.Format(time.RFC3339)
+	s.approvals[item.ApprovalID] = item
+	if sessionItem, ok := s.sessions[item.SessionID]; ok {
+		if !isTerminalSessionStatus(sessionItem.Status) {
+			sessionItem.Status = "running"
+			sessionItem.LastOutputSummary = "approval cancelled_by_local_input"
+		}
+		if sessionItem.PendingApprovals > 0 {
+			sessionItem.PendingApprovals--
+		}
+		s.sessions[item.SessionID] = sessionItem
+	}
+	return item, nil
+}
+
 func isTerminalSessionStatus(status string) bool {
 	switch status {
 	case "completed", "failed", "closed", "lost":
@@ -1335,6 +1388,7 @@ func newRouter() http.Handler {
 	mux.HandleFunc("/api/v1/agent/session-updates", agentSessionUpdatesHandler)
 	mux.HandleFunc("/api/v1/agent/approvals", agentApprovalsHandler)
 	mux.HandleFunc("/api/v1/agent/approval-acks", agentApprovalAcksHandler)
+	mux.HandleFunc("/api/v1/agent/approval-supersedes", agentApprovalSupersedesHandler)
 	mux.HandleFunc("/api/v1/agent/output-chunks", agentOutputChunksHandler)
 	mux.HandleFunc("/api/v1/approvals/", approvalScopedHandler)
 	mux.HandleFunc("/api/v1/devices/", deviceScopedHandler)
@@ -2252,6 +2306,56 @@ func agentApprovalAcksHandler(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, envelope{
 		Data:      data,
+		RequestID: requestID(r),
+		TraceID:   traceID(r),
+	})
+}
+
+func agentApprovalSupersedesHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req supersedeApprovalRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, r, http.StatusBadRequest, "message_schema_invalid", err.Error())
+		return
+	}
+	if req.ApprovalID == "" || req.SessionID == "" {
+		writeError(w, r, http.StatusBadRequest, "message_schema_invalid", "approval_id and session_id are required")
+		return
+	}
+	if appErr := store.ValidateApprovalDeviceToken(req.ApprovalID, bearerToken(r)); appErr != nil {
+		writeAppError(w, r, appErr)
+		return
+	}
+	item, appErr := store.SupersedeApproval(req, time.Now().UTC())
+	if appErr != nil {
+		writeAppError(w, r, appErr)
+		return
+	}
+	pushApprovalUpdatedToClients(item)
+	if sessionItem, appErr := store.GetSession(item.SessionID); appErr == nil {
+		pushSessionUpdatedToClients(sessionItem)
+	}
+	store.AppendAuditLog(auditLog{
+		TenantID:     item.TenantID,
+		ActorType:    "local",
+		ActorID:      item.DeviceID,
+		Action:       "approval.superseded",
+		ResourceType: "approval",
+		ResourceID:   item.ApprovalID,
+		Result:       "success",
+		TraceID:      traceID(r),
+		Detail: map[string]any{
+			"session_id": item.SessionID,
+			"reason":     item.DecisionPayload,
+			"detail":     req.Detail,
+		},
+	}, time.Now().UTC())
+	writeJSON(w, envelope{
+		Data:      item,
 		RequestID: requestID(r),
 		TraceID:   traceID(r),
 	})

@@ -10,34 +10,7 @@ import (
 )
 
 func TestPostgresDeliveryRetryMarksExhaustedDeliveryFailed(t *testing.T) {
-	databaseURL := os.Getenv("GATEPILOT_POSTGRES_TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("GATEPILOT_POSTGRES_TEST_DATABASE_URL is not set")
-	}
-
-	postgresStore, err := newPostgresStore(databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer postgresStore.db.Close()
-
-	previousStore := store
-	previousAgentHub := agentHub
-	previousClientHub := clientHub
-	previousDeviceTokens := testDeviceTokens
-	previousApprovalTokens := testApprovalTokens
-	store = postgresStore
-	agentHub = &agentConnectionHub{byDevice: map[string]*agentConnection{}}
-	clientHub = &clientConnectionHub{byTenant: map[string]map[string]*clientConnection{}}
-	testDeviceTokens = sync.Map{}
-	testApprovalTokens = sync.Map{}
-	defer func() {
-		store = previousStore
-		agentHub = previousAgentHub
-		clientHub = previousClientHub
-		testDeviceTokens = previousDeviceTokens
-		testApprovalTokens = previousApprovalTokens
-	}()
+	withPostgresTestStore(t)
 
 	server := httptest.NewServer(newRouter())
 	defer server.Close()
@@ -71,4 +44,69 @@ func TestPostgresDeliveryRetryMarksExhaustedDeliveryFailed(t *testing.T) {
 	if items := dataItems(t, audit); len(items) != 1 || items[0]["resource_id"] != approvalID {
 		t.Fatalf("audit logs = %v, want postgres retry exhausted audit", items)
 	}
+}
+
+func TestPostgresApprovalSupersedeCancelsWaitingDecision(t *testing.T) {
+	withPostgresTestStore(t)
+
+	server := httptest.NewServer(newRouter())
+	defer server.Close()
+
+	code := createTestActivationCode(t, server.URL)
+	deviceID := registerTestDevice(t, server.URL, code)
+	sessionID := createTestSession(t, server.URL, deviceID)
+	approvalID := createTestApproval(t, server.URL, deviceID, sessionID)
+
+	body := postJSON(t, server.URL+"/api/v1/agent/approval-supersedes", map[string]any{
+		"approval_id": approvalID,
+		"session_id":  sessionID,
+		"reason":      "operator typed locally",
+		"detail": map[string]any{
+			"source": "postgres-test",
+		},
+	}, http.StatusOK)
+	data := body["data"].(map[string]any)
+	if data["status"] != "cancelled_by_local_input" || data["decision_type"] != "local_input" || data["delivery_status"] != "cancelled" {
+		t.Fatalf("superseded postgres approval = %v, want local cancellation", data)
+	}
+
+	detail := getJSON(t, server.URL+"/api/v1/sessions/"+sessionID, http.StatusOK)
+	sessionData := detail["data"].(map[string]any)
+	if sessionData["status"] != "running" || sessionData["pending_approval_count"] != float64(0) {
+		t.Fatalf("session after postgres supersede = %v, want running with no pending approvals", sessionData)
+	}
+}
+
+func withPostgresTestStore(t *testing.T) {
+	t.Helper()
+	databaseURL := os.Getenv("GATEPILOT_POSTGRES_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("GATEPILOT_POSTGRES_TEST_DATABASE_URL is not set")
+	}
+
+	postgresStore, err := newPostgresStore(databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		postgresStore.db.Close()
+	})
+
+	previousStore := store
+	previousAgentHub := agentHub
+	previousClientHub := clientHub
+	previousDeviceTokens := testDeviceTokens
+	previousApprovalTokens := testApprovalTokens
+	store = postgresStore
+	agentHub = &agentConnectionHub{byDevice: map[string]*agentConnection{}}
+	clientHub = &clientConnectionHub{byTenant: map[string]map[string]*clientConnection{}}
+	testDeviceTokens = sync.Map{}
+	testApprovalTokens = sync.Map{}
+	t.Cleanup(func() {
+		store = previousStore
+		agentHub = previousAgentHub
+		clientHub = previousClientHub
+		testDeviceTokens = previousDeviceTokens
+		testApprovalTokens = previousApprovalTokens
+	})
 }

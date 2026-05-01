@@ -181,6 +181,42 @@ func TestDeliveryRetryMarksExhaustedDeliveryFailed(t *testing.T) {
 	}
 }
 
+func TestApprovalSupersedeCancelsWaitingDecision(t *testing.T) {
+	resetTestStore()
+	server := httptest.NewServer(newRouter())
+	defer server.Close()
+
+	code := createTestActivationCode(t, server.URL)
+	deviceID := registerTestDevice(t, server.URL, code)
+	sessionID := createTestSession(t, server.URL, deviceID)
+	approvalID := createTestApproval(t, server.URL, deviceID, sessionID)
+
+	body := postJSON(t, server.URL+"/api/v1/agent/approval-supersedes", map[string]any{
+		"approval_id": approvalID,
+		"session_id":  sessionID,
+		"reason":      "operator typed locally",
+		"detail": map[string]any{
+			"source": "test",
+		},
+	}, http.StatusOK)
+	data := body["data"].(map[string]any)
+	if data["status"] != "cancelled_by_local_input" || data["decision_type"] != "local_input" || data["delivery_status"] != "cancelled" {
+		t.Fatalf("superseded approval = %v, want local cancellation", data)
+	}
+	detail := getJSON(t, server.URL+"/api/v1/sessions/"+sessionID, http.StatusOK)
+	sessionData := detail["data"].(map[string]any)
+	if sessionData["status"] != "running" || sessionData["pending_approval_count"] != float64(0) {
+		t.Fatalf("session after supersede = %v, want running with no pending approvals", sessionData)
+	}
+	postJSON(t, server.URL+"/api/v1/approvals/"+approvalID+"/decision", map[string]any{
+		"decision_type": "approve",
+	}, http.StatusConflict)
+	audit := getJSON(t, server.URL+"/api/v1/tenants/"+testTenantID+"/audit-logs?action=approval.superseded", http.StatusOK)
+	if items := dataItems(t, audit); len(items) != 1 || items[0]["resource_id"] != approvalID {
+		t.Fatalf("audit logs = %v, want superseded audit", items)
+	}
+}
+
 func TestAuditLogsCaptureDecisionAndAck(t *testing.T) {
 	resetTestStore()
 	server := httptest.NewServer(newRouter())

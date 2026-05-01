@@ -49,6 +49,8 @@ func main() {
 		detectApproval(os.Args[2:])
 	case "ack-decision":
 		ackDecision(os.Args[2:])
+	case "supersede-approval":
+		supersedeApproval(os.Args[2:])
 	case "connect":
 		connectAgent(os.Args[2:])
 	case "flush-queue":
@@ -411,6 +413,56 @@ func ackDecision(args []string) {
 	respBody, err := postJSONWithToken(serverURL+"/api/v1/agent/approval-acks", body, deviceTokenFor(""))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "ack decision failed: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Println(string(respBody))
+}
+
+func supersedeApproval(args []string) {
+	approvalID := ""
+	sessionID := ""
+	reason := "local_input"
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--approval-id":
+			if i+1 < len(args) {
+				approvalID = args[i+1]
+				i++
+			}
+		case "--session-id":
+			if i+1 < len(args) {
+				sessionID = args[i+1]
+				i++
+			}
+		case "--reason":
+			if i+1 < len(args) {
+				reason = args[i+1]
+				i++
+			}
+		}
+	}
+	if approvalID == "" || sessionID == "" {
+		fmt.Fprintln(os.Stderr, "missing --approval-id or --session-id")
+		os.Exit(2)
+	}
+
+	serverURL := getenv("GATEPILOT_SERVER_URL", "http://127.0.0.1:8080")
+	payload := map[string]any{
+		"approval_id": approvalID,
+		"session_id":  sessionID,
+		"reason":      reason,
+		"detail": map[string]any{
+			"source": "local-terminal",
+		},
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	respBody, err := postJSONWithToken(serverURL+"/api/v1/agent/approval-supersedes", body, deviceTokenFor(""))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "supersede approval failed: %v\n", err)
 		os.Exit(1)
 	}
 	fmt.Println(string(respBody))

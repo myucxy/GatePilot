@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://gatepilot.local/schema/ws/approval.superseded.schema.json",
+  "title": "approval.superseded",
+  "allOf": [
+    { "$ref": "./envelope.schema.json" },
+    {
+      "type": "object",
+      "properties": {
+        "type": { "const": "approval.superseded" },
+        "payload": {
+          "type": "object",
+          "required": ["approval_id", "session_id", "reason", "detail"],
+          "properties": {
+            "approval_id": { "type": "string" },
+            "session_id": { "type": "string" },
+            "reason": { "type": "string" },
+            "detail": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          },
+          "additionalProperties": false
+        }
+      }
+    }
+  ]
+}

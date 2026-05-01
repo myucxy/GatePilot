@@ -628,7 +628,12 @@ func (s *postgresStore) ListApprovals(tenantID string, status string) []approval
 SELECT ar.id::text, ar.tenant_id::text, ar.device_id::text, ar.session_id::text, ar.cli_type, ar.event_type, ar.risk_level,
        ar.prompt_text, ar.context_before, ar.status, ar.decision_type, ar.decision_payload,
        COALESCE((SELECT id::text FROM approval_deliveries WHERE approval_id = ar.id ORDER BY created_at DESC LIMIT 1), '') AS delivery_id,
-       COALESCE((SELECT status FROM approval_deliveries WHERE approval_id = ar.id ORDER BY created_at DESC LIMIT 1), 'pending') AS delivery_status,
+       CASE
+         WHEN ar.status = 'cancelled_by_local_input' THEN 'cancelled'
+         ELSE COALESCE((SELECT status FROM approval_deliveries WHERE approval_id = ar.id ORDER BY created_at DESC LIMIT 1), 'pending')
+       END AS delivery_status,
+       COALESCE((SELECT attempt_count FROM approval_deliveries WHERE approval_id = ar.id ORDER BY created_at DESC LIMIT 1), 0) AS delivery_attempts,
+       (SELECT sent_at FROM approval_deliveries WHERE approval_id = ar.id ORDER BY created_at DESC LIMIT 1) AS delivery_sent_at,
        ar.decided_by::text, ar.decided_at, ar.created_at, ar.expires_at
 FROM approval_requests ar
 WHERE ar.tenant_id = $1`
@@ -837,6 +842,105 @@ WHERE id = $2`, "approval "+nextStatus, req.SessionID)
 	item.Status = nextStatus
 	item.DeliveryStatus = nextDeliveryStatus
 	return approvalAckData(item), nil
+}
+
+func (s *postgresStore) SupersedeApproval(req supersedeApprovalRequest, now time.Time) (approval, *appError) {
+	if req.Reason == "" {
+		req.Reason = "local_input"
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return approval{}, internalStoreError(err)
+	}
+	defer tx.Rollback()
+
+	var tenantID, deviceID, sessionID, status string
+	err = tx.QueryRowContext(ctx, `
+SELECT tenant_id::text, device_id::text, session_id::text, status
+FROM approval_requests
+WHERE id = $1
+FOR UPDATE`, req.ApprovalID).Scan(&tenantID, &deviceID, &sessionID, &status)
+	if err == sql.ErrNoRows {
+		return approval{}, &appError{HTTPStatus: http.StatusNotFound, Code: "approval_not_found", Message: "approval not found"}
+	}
+	if err != nil {
+		return approval{}, internalStoreError(err)
+	}
+	if req.SessionID != "" && sessionID != req.SessionID {
+		return approval{}, &appError{HTTPStatus: http.StatusConflict, Code: "approval_session_mismatch", Message: "approval does not belong to session"}
+	}
+	if status == "cancelled_by_local_input" {
+		item, appErr := s.findApprovalByID(ctx, tx, req.ApprovalID)
+		if appErr != nil {
+			return approval{}, appErr
+		}
+		return item, nil
+	}
+	if status != "waiting_decision" {
+		return approval{}, &appError{HTTPStatus: http.StatusConflict, Code: "approval_already_decided", Message: "approval already decided"}
+	}
+
+	decidedBy := map[string]string{
+		"actor_type":   "local",
+		"actor_id":     deviceID,
+		"display_name": "Agent local input",
+		"client_type":  "agent",
+	}
+	decidedByJSON, err := json.Marshal(decidedBy)
+	if err != nil {
+		return approval{}, internalStoreError(err)
+	}
+	_, err = tx.ExecContext(ctx, `
+UPDATE approval_requests
+SET status = 'cancelled_by_local_input',
+    decision_type = 'local_input',
+    decision_payload = $1,
+    decided_by = $2::jsonb,
+    decided_at = $3,
+    updated_at = $3
+WHERE id = $4`, req.Reason, string(decidedByJSON), now, req.ApprovalID)
+	if err != nil {
+		return approval{}, internalStoreError(err)
+	}
+	_, err = tx.ExecContext(ctx, `
+UPDATE approval_deliveries
+SET status = 'cancelled', updated_at = $1
+WHERE approval_id = $2 AND status IN ('pending', 'sent')`, now, req.ApprovalID)
+	if err != nil {
+		return approval{}, internalStoreError(err)
+	}
+	_, err = tx.ExecContext(ctx, `
+INSERT INTO approval_actions(tenant_id, approval_id, action_type, actor_type, actor_id, client_type, payload_redacted, result, created_at)
+VALUES ($1, $2, 'local_input', 'local', $3, 'agent', $4, 'accepted', $5)`,
+		tenantID, req.ApprovalID, nullableUUID(deviceID), req.Reason, now)
+	if err != nil {
+		return approval{}, internalStoreError(err)
+	}
+	_, err = tx.ExecContext(ctx, `
+UPDATE sessions
+SET status = CASE
+        WHEN status IN ('completed', 'failed', 'closed', 'lost') THEN status
+        ELSE 'running'
+    END,
+    pending_approval_count = GREATEST(pending_approval_count - 1, 0),
+    last_output_summary = CASE
+        WHEN status IN ('completed', 'failed', 'closed', 'lost') THEN last_output_summary
+        ELSE 'approval cancelled_by_local_input'
+    END
+WHERE id = $1`, sessionID)
+	if err != nil {
+		return approval{}, internalStoreError(err)
+	}
+	item, appErr := s.findApprovalByID(ctx, tx, req.ApprovalID)
+	if appErr != nil {
+		return approval{}, appErr
+	}
+	if err := tx.Commit(); err != nil {
+		return approval{}, internalStoreError(err)
+	}
+	return item, nil
 }
 
 func (s *postgresStore) CreateDeviceGrant(deviceID string, req createDeviceGrantRequest, grantedBy string, now time.Time) (deviceGrant, *appError) {
@@ -1650,7 +1754,10 @@ func approvalByIDQuery() string {
 SELECT ar.id::text, ar.tenant_id::text, ar.device_id::text, ar.session_id::text, ar.cli_type, ar.event_type, ar.risk_level,
        ar.prompt_text, ar.context_before, ar.status, ar.decision_type, ar.decision_payload,
        COALESCE((SELECT id::text FROM approval_deliveries WHERE approval_id = ar.id ORDER BY created_at DESC LIMIT 1), '') AS delivery_id,
-       COALESCE((SELECT status FROM approval_deliveries WHERE approval_id = ar.id ORDER BY created_at DESC LIMIT 1), 'pending') AS delivery_status,
+       CASE
+         WHEN ar.status = 'cancelled_by_local_input' THEN 'cancelled'
+         ELSE COALESCE((SELECT status FROM approval_deliveries WHERE approval_id = ar.id ORDER BY created_at DESC LIMIT 1), 'pending')
+       END AS delivery_status,
        COALESCE((SELECT attempt_count FROM approval_deliveries WHERE approval_id = ar.id ORDER BY created_at DESC LIMIT 1), 0) AS delivery_attempts,
        (SELECT sent_at FROM approval_deliveries WHERE approval_id = ar.id ORDER BY created_at DESC LIMIT 1) AS delivery_sent_at,
        ar.decided_by::text, ar.decided_at, ar.created_at, ar.expires_at

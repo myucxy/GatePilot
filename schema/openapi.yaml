@@ -429,6 +429,34 @@ paths:
           $ref: "#/components/responses/ErrorResponse"
         "409":
           $ref: "#/components/responses/ErrorResponse"
+  /agent/approval-supersedes:
+    post:
+      operationId: supersedeAgentApproval
+      summary: Report that local terminal input superseded a pending remote approval
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SupersedeAgentApprovalRequest"
+      responses:
+        "200":
+          description: Approval cancelled by local input
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/Approval"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
   /agent/output-chunks:
     post:
       operationId: appendAgentOutputChunk
@@ -1696,3 +1724,21 @@ components:
           enum:
             - acked
             - failed
+    SupersedeAgentApprovalRequest:
+      type: object
+      required:
+        - approval_id
+        - session_id
+        - reason
+        - detail
+      properties:
+        approval_id:
+          type: string
+          format: uuid
+        session_id:
+          type: string
+          format: uuid
+        reason:
+          type: string
+        detail:
+          type: object

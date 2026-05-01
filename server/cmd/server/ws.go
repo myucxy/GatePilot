@@ -156,6 +156,44 @@ func agentWebSocketHandler(w http.ResponseWriter, r *http.Request) {
 			if item, appErr := store.GetApproval(payload.ApprovalID); appErr == nil {
 				pushApprovalUpdatedToClients(item)
 			}
+		case "approval.superseded":
+			if deviceID == "" {
+				writeWSError(conn, msg.TraceID, "message_schema_invalid", "agent.hello is required before supersede")
+				return
+			}
+			var payload supersedeApprovalRequest
+			if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+				writeWSError(conn, msg.TraceID, "message_schema_invalid", "invalid approval.superseded payload")
+				return
+			}
+			if appErr := store.ValidateApprovalDeviceToken(payload.ApprovalID, bearerToken(r)); appErr != nil {
+				writeWSError(conn, msg.TraceID, appErr.Code, appErr.Message)
+				return
+			}
+			item, appErr := store.SupersedeApproval(payload, time.Now().UTC())
+			if appErr != nil {
+				writeWSError(conn, msg.TraceID, appErr.Code, appErr.Message)
+				return
+			}
+			pushApprovalUpdatedToClients(item)
+			if sessionItem, appErr := store.GetSession(item.SessionID); appErr == nil {
+				pushSessionUpdatedToClients(sessionItem)
+			}
+			store.AppendAuditLog(auditLog{
+				TenantID:     item.TenantID,
+				ActorType:    "local",
+				ActorID:      item.DeviceID,
+				Action:       "approval.superseded",
+				ResourceType: "approval",
+				ResourceID:   item.ApprovalID,
+				Result:       "success",
+				TraceID:      msg.TraceID,
+				Detail: map[string]any{
+					"session_id": item.SessionID,
+					"reason":     item.DecisionPayload,
+					"detail":     payload.Detail,
+				},
+			}, time.Now().UTC())
 		default:
 			writeWSError(conn, msg.TraceID, "message_type_unknown", "unknown websocket message type")
 			return
