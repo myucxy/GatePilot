@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -17,6 +18,33 @@ import (
 
 func applyHiddenWindow(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: 0x08000000}
+}
+
+func maintainTerminalTitle(title string) func() {
+	if strings.TrimSpace(title) == "" {
+		return func() {}
+	}
+	previous, hadPrevious := getConsoleTitle()
+	setConsoleTitle(title)
+	done := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				setConsoleTitle(title)
+			case <-done:
+				return
+			}
+		}
+	}()
+	return func() {
+		close(done)
+		if hadPrevious {
+			setConsoleTitle(previous)
+		}
+	}
 }
 
 type interactiveCommandOptions struct {
@@ -265,7 +293,29 @@ var (
 	kernel32                = windows.NewLazySystemDLL("kernel32.dll")
 	procCreatePseudoConsole = kernel32.NewProc("CreatePseudoConsole")
 	procClosePseudoConsole  = kernel32.NewProc("ClosePseudoConsole")
+	procSetConsoleTitle     = kernel32.NewProc("SetConsoleTitleW")
+	procGetConsoleTitle     = kernel32.NewProc("GetConsoleTitleW")
 )
+
+func setConsoleTitle(title string) {
+	ptr, err := windows.UTF16PtrFromString(title)
+	if err != nil {
+		return
+	}
+	procSetConsoleTitle.Call(uintptr(unsafe.Pointer(ptr)))
+}
+
+func getConsoleTitle() (string, bool) {
+	buffer := make([]uint16, 1024)
+	r1, _, _ := procGetConsoleTitle.Call(uintptr(unsafe.Pointer(&buffer[0])), uintptr(len(buffer)))
+	if r1 == 0 {
+		return "", false
+	}
+	if int(r1) > len(buffer) {
+		return "", false
+	}
+	return windows.UTF16ToString(buffer[:r1]), true
+}
 
 func createPseudoConsole(size windows.Coord, input windows.Handle, output windows.Handle) (windows.Handle, error) {
 	var pseudoConsole windows.Handle

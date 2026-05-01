@@ -229,6 +229,18 @@ func TestTerminalPassthroughForTTYBasedTools(t *testing.T) {
 	}
 }
 
+func TestTerminalTitleForCLI(t *testing.T) {
+	if got := terminalTitleForCLI("codex"); got != "GatePilot:codex" {
+		t.Fatalf("codex title = %q", got)
+	}
+	if got := terminalTitleForCLI("claude-code"); got != "GatePilot:claude" {
+		t.Fatalf("claude title = %q", got)
+	}
+	if got := terminalTitleForCLI("custom"); got != "" {
+		t.Fatalf("custom title = %q, want empty", got)
+	}
+}
+
 func TestAIToolTypeForCLI(t *testing.T) {
 	if got := aiToolTypeForCLI("claude-code"); got != "claude" {
 		t.Fatalf("ai tool type = %q, want claude", got)

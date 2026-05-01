@@ -11,6 +11,10 @@ import (
 
 func applyHiddenWindow(cmd *exec.Cmd) {}
 
+func maintainTerminalTitle(_ string) func() {
+	return func() {}
+}
+
 type interactiveCommandOptions struct {
 	Args     []string
 	Dir      string

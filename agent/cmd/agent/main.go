@@ -450,12 +450,25 @@ func shouldUseTerminalPassthrough(options runCLIOptions) bool {
 	}
 }
 
+func terminalTitleForCLI(cliType string) string {
+	switch adapter.NormalizeCLIType(cliType) {
+	case "codex":
+		return "GatePilot:codex"
+	case "claude_code":
+		return "GatePilot:claude"
+	default:
+		return ""
+	}
+}
+
 func runTerminalPassthroughCLI(options runCLIOptions) {
 	if len(options.CommandArgs) == 0 {
 		fmt.Fprintln(os.Stderr, "missing command")
 		os.Exit(2)
 	}
 	options.CLIType = adapter.NormalizeCLIType(options.CLIType)
+	restoreTitle := maintainTerminalTitle(terminalTitleForCLI(options.CLIType))
+	defer restoreTitle()
 	toolType := aiToolTypeForCLI(options.CLIType)
 	if toolType != "" {
 		_ = ensureAIToolConfigured(toolType, options.CommandArgs[0])
