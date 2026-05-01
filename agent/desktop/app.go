@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -21,17 +22,30 @@ type App struct {
 }
 
 type AgentLocalSettings struct {
-	Mode                 string `json:"mode"`
-	StartOnLogin         bool   `json:"start_on_login"`
-	NotificationEnabled  bool   `json:"notification_enabled"`
-	NotificationStyle    string `json:"notification_style"`
-	HistoryRetentionDays int    `json:"history_retention_days"`
-	CaptureOutputMode    string `json:"capture_output_mode"`
-	DefaultCLIType       string `json:"default_cli_type"`
-	ServerURL            string `json:"server_url"`
-	TenantID             string `json:"tenant_id"`
-	DeviceID             string `json:"device_id"`
-	ClientInstanceID     string `json:"client_instance_id"`
+	Mode                 string         `json:"mode"`
+	StartOnLogin         bool           `json:"start_on_login"`
+	NotificationEnabled  bool           `json:"notification_enabled"`
+	NotificationStyle    string         `json:"notification_style"`
+	HistoryRetentionDays int            `json:"history_retention_days"`
+	CaptureOutputMode    string         `json:"capture_output_mode"`
+	DefaultCLIType       string         `json:"default_cli_type"`
+	ServerURL            string         `json:"server_url"`
+	TenantID             string         `json:"tenant_id"`
+	DeviceID             string         `json:"device_id"`
+	ClientInstanceID     string         `json:"client_instance_id"`
+	AITools              []AIToolConfig `json:"ai_tools"`
+}
+
+type AIToolConfig struct {
+	ToolID                  string `json:"tool_id"`
+	ToolType                string `json:"tool_type"`
+	DisplayName             string `json:"display_name"`
+	Enabled                 bool   `json:"enabled"`
+	HomeDir                 string `json:"home_dir"`
+	HistoryPath             string `json:"history_path"`
+	SessionsDir             string `json:"sessions_dir"`
+	ExecutablePath          string `json:"executable_path"`
+	ContinueCommandTemplate string `json:"continue_command_template"`
 }
 
 type AgentStatus struct {
@@ -73,6 +87,42 @@ type SessionDetail struct {
 	Output    []map[string]any `json:"output"`
 	Approvals []map[string]any `json:"approvals"`
 	Decisions []map[string]any `json:"decisions"`
+}
+
+type AIToolSessionRecord struct {
+	ID           string `json:"id"`
+	ToolID       string `json:"tool_id"`
+	ToolType     string `json:"tool_type"`
+	DisplayName  string `json:"display_name"`
+	Title        string `json:"title"`
+	WorkingDir   string `json:"working_dir"`
+	CreatedAt    string `json:"created_at"`
+	UpdatedAt    string `json:"updated_at"`
+	MessageCount int    `json:"message_count"`
+	Preview      string `json:"preview"`
+	SourcePath   string `json:"source_path"`
+	CanContinue  bool   `json:"can_continue"`
+}
+
+type AIToolSessionList struct {
+	Items []AIToolSessionRecord `json:"items"`
+}
+
+type AIToolMessageRecord struct {
+	Timestamp string         `json:"timestamp"`
+	Role      string         `json:"role"`
+	Type      string         `json:"type"`
+	Text      string         `json:"text"`
+	Raw       map[string]any `json:"raw,omitempty"`
+}
+
+type AIToolSessionDetail struct {
+	Session  AIToolSessionRecord   `json:"session"`
+	Messages []AIToolMessageRecord `json:"messages"`
+}
+
+type AIToolConfigList struct {
+	Items []AIToolConfig `json:"items"`
 }
 
 func NewApp() *App {
@@ -187,6 +237,58 @@ func (a *App) ReplySession(sessionID string, text string) error {
 	return postJSON("/api/local/sessions/"+sessionID+"/input", map[string]string{"text": text}, nil)
 }
 
+func (a *App) DetectAIToolDefaults() (AIToolConfigList, error) {
+	var response struct {
+		Data AIToolConfigList `json:"data"`
+	}
+	if err := getJSON("/api/local/ai-tools/defaults", &response); err != nil {
+		return AIToolConfigList{}, err
+	}
+	return response.Data, nil
+}
+
+func (a *App) ListAIToolSessions(toolID string, query string, limit int) (AIToolSessionList, error) {
+	values := url.Values{}
+	if strings.TrimSpace(toolID) != "" {
+		values.Set("tool_id", strings.TrimSpace(toolID))
+	}
+	if strings.TrimSpace(query) != "" {
+		values.Set("query", strings.TrimSpace(query))
+	}
+	if limit > 0 {
+		values.Set("limit", fmt.Sprintf("%d", limit))
+	}
+	path := "/api/local/ai-tools/sessions"
+	if encoded := values.Encode(); encoded != "" {
+		path += "?" + encoded
+	}
+	var response struct {
+		Data AIToolSessionList `json:"data"`
+	}
+	if err := getJSON(path, &response); err != nil {
+		return AIToolSessionList{}, err
+	}
+	return response.Data, nil
+}
+
+func (a *App) GetAIToolSessionDetail(toolID string, sessionID string) (AIToolSessionDetail, error) {
+	var response struct {
+		Data AIToolSessionDetail `json:"data"`
+	}
+	if err := getJSON(aiToolSessionPath("/api/local/ai-tool-session", toolID, sessionID), &response); err != nil {
+		return AIToolSessionDetail{}, err
+	}
+	return response.Data, nil
+}
+
+func (a *App) ContinueAIToolSession(toolID string, sessionID string) error {
+	return postJSON(aiToolSessionPath("/api/local/ai-tool-session/continue", toolID, sessionID), map[string]any{}, nil)
+}
+
+func (a *App) DeleteAIToolSession(toolID string, sessionID string) error {
+	return requestJSON(http.MethodDelete, aiToolSessionPath("/api/local/ai-tool-session", toolID, sessionID), nil, nil)
+}
+
 func coreAgentPath() (string, error) {
 	if path := os.Getenv("GATEPILOT_AGENT_EXE"); path != "" {
 		return path, nil
@@ -229,16 +331,32 @@ func getJSON(path string, target any) error {
 }
 
 func postJSON(path string, payload any, target any) error {
+	return requestJSON(http.MethodPost, path, payload, target)
+}
+
+func requestJSON(method string, path string, payload any, target any) error {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
 	client := http.Client{Timeout: 20 * time.Second}
-	resp, err := client.Post("http://"+trayAddr+path, "application/json", bytes.NewReader(body))
+	req, err := http.NewRequest(method, "http://"+trayAddr+path, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
 	if err != nil {
 		return err
 	}
 	return decodeResponse(resp, target)
+}
+
+func aiToolSessionPath(base string, toolID string, sessionID string) string {
+	values := url.Values{}
+	values.Set("tool_id", toolID)
+	values.Set("session_id", sessionID)
+	return base + "?" + values.Encode()
 }
 
 func decodeResponse(resp *http.Response, target any) error {

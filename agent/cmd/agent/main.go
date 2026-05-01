@@ -373,17 +373,18 @@ func parseRunCLIOptions(args []string) runCLIOptions {
 }
 
 type agentLocalSettings struct {
-	Mode                 string `json:"mode"`
-	StartOnLogin         bool   `json:"start_on_login"`
-	NotificationEnabled  bool   `json:"notification_enabled"`
-	NotificationStyle    string `json:"notification_style"`
-	HistoryRetentionDays int    `json:"history_retention_days"`
-	CaptureOutputMode    string `json:"capture_output_mode"`
-	DefaultCLIType       string `json:"default_cli_type"`
-	ServerURL            string `json:"server_url"`
-	TenantID             string `json:"tenant_id"`
-	DeviceID             string `json:"device_id"`
-	ClientInstanceID     string `json:"client_instance_id"`
+	Mode                 string         `json:"mode"`
+	StartOnLogin         bool           `json:"start_on_login"`
+	NotificationEnabled  bool           `json:"notification_enabled"`
+	NotificationStyle    string         `json:"notification_style"`
+	HistoryRetentionDays int            `json:"history_retention_days"`
+	CaptureOutputMode    string         `json:"capture_output_mode"`
+	DefaultCLIType       string         `json:"default_cli_type"`
+	ServerURL            string         `json:"server_url"`
+	TenantID             string         `json:"tenant_id"`
+	DeviceID             string         `json:"device_id"`
+	ClientInstanceID     string         `json:"client_instance_id"`
+	AITools              []aiToolConfig `json:"ai_tools"`
 }
 
 type agentLoginOptions struct {
@@ -522,6 +523,7 @@ func normalizeAgentLocalSettings(settings agentLocalSettings) agentLocalSettings
 	} else {
 		settings.DefaultCLIType = adapter.NormalizeCLIType(settings.DefaultCLIType)
 	}
+	settings.AITools = normalizeAIToolConfigs(settings.AITools)
 	return settings
 }
 
@@ -1062,6 +1064,35 @@ func newTrayHTTPHandler(state *trayState) http.Handler {
 		state.setSettings(settings)
 		writeTrayJSON(w, map[string]any{"data": localAgentStatus(state)})
 	})
+	mux.HandleFunc("/api/local/ai-tools/defaults", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		writeTrayJSON(w, map[string]any{"data": map[string]any{"items": defaultAIToolConfigs()}})
+	})
+	mux.HandleFunc("/api/local/ai-tools/sessions", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		items, err := listAIToolSessions(state.currentSettings(), aiToolSessionFilter{
+			ToolID: r.URL.Query().Get("tool_id"),
+			Query:  r.URL.Query().Get("query"),
+			Limit:  intQueryParam(r, "limit"),
+		})
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeTrayJSON(w, map[string]any{"data": map[string]any{"items": items}})
+	})
+	mux.HandleFunc("/api/local/ai-tool-session", func(w http.ResponseWriter, r *http.Request) {
+		handleTrayAIToolSession(w, r, state)
+	})
+	mux.HandleFunc("/api/local/ai-tool-session/continue", func(w http.ResponseWriter, r *http.Request) {
+		handleTrayAIToolSessionContinue(w, r, state)
+	})
 	mux.HandleFunc("/api/local/approvals/confirm", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -1098,6 +1129,64 @@ func newTrayHTTPHandler(state *trayState) http.Handler {
 		handleTraySessionScoped(w, r)
 	})
 	return mux
+}
+
+func handleTrayAIToolSession(w http.ResponseWriter, r *http.Request, state *trayState) {
+	toolID := r.URL.Query().Get("tool_id")
+	sessionID := r.URL.Query().Get("session_id")
+	if strings.TrimSpace(toolID) == "" || strings.TrimSpace(sessionID) == "" {
+		http.Error(w, "tool_id and session_id are required", http.StatusBadRequest)
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		detail, ok, err := aiToolSessionDetail(state.currentSettings(), toolID, sessionID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if !ok {
+			http.Error(w, "ai tool session not found", http.StatusNotFound)
+			return
+		}
+		writeTrayJSON(w, map[string]any{"data": detail})
+	case http.MethodDelete:
+		result, ok, err := deleteAIToolSession(state.currentSettings(), toolID, sessionID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if !ok {
+			http.Error(w, "ai tool session not found", http.StatusNotFound)
+			return
+		}
+		writeTrayJSON(w, map[string]any{"data": result})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func handleTrayAIToolSessionContinue(w http.ResponseWriter, r *http.Request, state *trayState) {
+	toolID := r.URL.Query().Get("tool_id")
+	sessionID := r.URL.Query().Get("session_id")
+	if strings.TrimSpace(toolID) == "" || strings.TrimSpace(sessionID) == "" {
+		http.Error(w, "tool_id and session_id are required", http.StatusBadRequest)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	result, ok, err := continueAIToolSession(state.currentSettings(), toolID, sessionID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if !ok {
+		http.Error(w, "ai tool session not found", http.StatusNotFound)
+		return
+	}
+	writeTrayJSON(w, map[string]any{"data": result})
 }
 
 func handleTraySessionScoped(w http.ResponseWriter, r *http.Request) {
