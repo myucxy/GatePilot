@@ -15,6 +15,8 @@ D:\Dev\Env\Go\bin\go.exe run .\cmd\agent run --local-only --popup -- fake-ai-cli
 D:\Dev\Env\Go\bin\go.exe run .\cmd\agent tray
 D:\Dev\Env\Go\bin\go.exe run .\cmd\agent status
 D:\Dev\Env\Go\bin\go.exe run .\cmd\agent history
+D:\Dev\Env\Go\bin\go.exe run .\cmd\agent history --cli-type codex --status running --limit 20
+D:\Dev\Env\Go\bin\go.exe run .\cmd\agent reply --session-id <session_id> --text "continue"
 D:\Dev\Env\Go\bin\go.exe run .\cmd\agent login --server-url <url> --tenant-id <tenant_id> --device-id <device_id>
 D:\Dev\Env\Go\bin\go.exe run .\cmd\agent offline
 D:\Dev\Env\Go\bin\go.exe run .\cmd\agent logout
@@ -32,7 +34,9 @@ D:\Dev\Env\Go\bin\go.exe run .\cmd\agent run-fake
 
 `tray` starts the Windows tray control process in offline mode by default. When it is running, `run --local-only` sends detected approvals to the tray first; the tray applies the local notification settings and returns approve/reject/reply to the session host.
 
-`history` reads the local offline session history. Use `history --session-id <session_id>` for output chunks, approvals, and decisions for one session.
+`history` reads the local offline session history. Use `history --session-id <session_id>` for output chunks, approvals, and decisions for one session. Use `--cli-type`, `--status`, and `--limit` to filter the session list.
+
+`reply` sends text to a still-running local session that was started by `run --local-only`; ended sessions reject replies.
 
 `login` stores desktop online settings after registering an `agent_desktop` client instance. `offline` keeps the login identity but switches back to local-only mode. `logout` clears the desktop login identity and leaves the agent offline.
 

@@ -44,6 +44,8 @@ Offline local confirmation:
 .\gatepilot-agent.exe run --local-only --popup -- fake-ai-cli
 .\gatepilot-agent.exe status
 .\gatepilot-agent.exe history
+.\gatepilot-agent.exe history --cli-type codex --status running --limit 20
+.\gatepilot-agent.exe reply --session-id <session_id> --text "continue"
 .\gatepilot-agent.exe login --server-url <url> --tenant-id <tenant_id> --device-id <device_id>
 .\gatepilot-agent.exe offline
 .\gatepilot-agent.exe logout

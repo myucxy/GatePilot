@@ -81,6 +81,10 @@ try {
     if (-not $session -or $session.status -ne "completed" -or $session.pending_approval_count -ne 0) {
         throw "local history did not record completed session: $($history | ConvertTo-Json -Compress)"
     }
+    $filteredHistory = & $go run "$repoRoot\agent\cmd\agent" history --cli-type custom --status completed --limit 1 | ConvertFrom-Json
+    if ($filteredHistory.data.items.Count -ne 1 -or $filteredHistory.data.items[0].session_id -ne $session.session_id) {
+        throw "local history filter did not return completed custom session: $($filteredHistory | ConvertTo-Json -Compress)"
+    }
     $detail = & $go run "$repoRoot\agent\cmd\agent" history --session-id $session.session_id | ConvertFrom-Json
     if ($detail.data.approvals.Count -lt 1 -or $detail.data.decisions.Count -lt 1 -or $detail.data.output.Count -lt 1) {
         throw "local history detail missing output, approval, or decision: $($detail | ConvertTo-Json -Compress)"

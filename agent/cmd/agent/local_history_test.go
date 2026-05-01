@@ -83,3 +83,24 @@ func TestLocalHistoryStoresSessionApprovalAndDecision(t *testing.T) {
 		t.Fatalf("detail = %+v, want output approval and decision", detail)
 	}
 }
+
+func TestQueryLocalSessionsFiltersAndLimits(t *testing.T) {
+	t.Setenv("GATEPILOT_AGENT_HISTORY", filepath.Join(t.TempDir(), "history.json"))
+	for _, item := range []localSessionRecord{
+		{SessionID: "session-1", CLIType: "custom", Status: "completed", StartedAt: "2026-05-01T00:00:00Z"},
+		{SessionID: "session-2", CLIType: "codex", Status: "running", StartedAt: "2026-05-01T00:01:00Z"},
+		{SessionID: "session-3", CLIType: "codex", Status: "completed", StartedAt: "2026-05-01T00:02:00Z"},
+	} {
+		if err := upsertLocalSession(item); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	items, err := queryLocalSessions(localSessionFilter{CLIType: "codex", Status: "completed", Limit: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].SessionID != "session-3" {
+		t.Fatalf("items = %+v, want latest completed codex session", items)
+	}
+}

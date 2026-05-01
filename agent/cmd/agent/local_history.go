@@ -16,6 +16,12 @@ type localHistory struct {
 	LastModified string                `json:"last_modified"`
 }
 
+type localSessionFilter struct {
+	CLIType string
+	Status  string
+	Limit   int
+}
+
 type localSessionRecord struct {
 	SessionID           string `json:"session_id"`
 	CLIType             string `json:"cli_type"`
@@ -204,14 +210,30 @@ func appendLocalDecision(item localDecisionRecord) error {
 }
 
 func listLocalSessions() ([]localSessionRecord, error) {
+	return queryLocalSessions(localSessionFilter{})
+}
+
+func queryLocalSessions(filter localSessionFilter) ([]localSessionRecord, error) {
 	history, err := loadLocalHistory()
 	if err != nil {
 		return nil, err
 	}
-	items := append([]localSessionRecord(nil), history.Sessions...)
+	items := []localSessionRecord{}
+	for _, item := range history.Sessions {
+		if filter.CLIType != "" && item.CLIType != filter.CLIType {
+			continue
+		}
+		if filter.Status != "" && item.Status != filter.Status {
+			continue
+		}
+		items = append(items, item)
+	}
 	sort.Slice(items, func(i, j int) bool {
 		return items[i].StartedAt > items[j].StartedAt
 	})
+	if filter.Limit > 0 && len(items) > filter.Limit {
+		items = items[:filter.Limit]
+	}
 	return items, nil
 }
 

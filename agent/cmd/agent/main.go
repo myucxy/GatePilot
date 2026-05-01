@@ -78,6 +78,8 @@ func main() {
 		runAgentTray(os.Args[2:])
 	case "history":
 		printLocalHistory(os.Args[2:])
+	case "reply":
+		replyLocalSession(os.Args[2:])
 	case "status":
 		printAgentStatus()
 	case "login":
@@ -834,7 +836,11 @@ func newTrayHTTPHandler(state *trayState) http.Handler {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		items, err := listLocalSessions()
+		items, err := queryLocalSessions(localSessionFilter{
+			CLIType: r.URL.Query().Get("cli_type"),
+			Status:  r.URL.Query().Get("status"),
+			Limit:   intQueryParam(r, "limit"),
+		})
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -1149,6 +1155,18 @@ func writeTrayJSON(w http.ResponseWriter, value any) {
 	_ = json.NewEncoder(w).Encode(value)
 }
 
+func intQueryParam(r *http.Request, key string) int {
+	value := strings.TrimSpace(r.URL.Query().Get(key))
+	if value == "" {
+		return 0
+	}
+	var parsed int
+	if _, err := fmt.Sscanf(value, "%d", &parsed); err != nil {
+		return 0
+	}
+	return parsed
+}
+
 func currentWorkingDir() string {
 	wd, err := os.Getwd()
 	if err != nil {
@@ -1159,11 +1177,27 @@ func currentWorkingDir() string {
 
 func printLocalHistory(args []string) {
 	sessionID := ""
+	filter := localSessionFilter{}
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--session-id":
 			if i+1 < len(args) {
 				sessionID = args[i+1]
+				i++
+			}
+		case "--cli-type":
+			if i+1 < len(args) {
+				filter.CLIType = adapter.NormalizeCLIType(args[i+1])
+				i++
+			}
+		case "--status":
+			if i+1 < len(args) {
+				filter.Status = args[i+1]
+				i++
+			}
+		case "--limit":
+			if i+1 < len(args) {
+				_, _ = fmt.Sscanf(args[i+1], "%d", &filter.Limit)
 				i++
 			}
 		}
@@ -1181,12 +1215,43 @@ func printLocalHistory(args []string) {
 		fmt.Println(mustJSON(map[string]any{"data": detail}))
 		return
 	}
-	items, err := listLocalSessions()
+	items, err := queryLocalSessions(filter)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 	fmt.Println(mustJSON(map[string]any{"data": map[string]any{"items": items}}))
+}
+
+func replyLocalSession(args []string) {
+	sessionID := ""
+	text := ""
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--session-id":
+			if i+1 < len(args) {
+				sessionID = args[i+1]
+				i++
+			}
+		case "--text":
+			if i+1 < len(args) {
+				text = args[i+1]
+				i++
+			}
+		}
+	}
+	if strings.TrimSpace(sessionID) == "" || strings.TrimSpace(text) == "" {
+		fmt.Fprintln(os.Stderr, "missing --session-id or --text")
+		os.Exit(2)
+	}
+	if err := sendLocalSessionInput(sessionID, text); err != nil {
+		fmt.Fprintf(os.Stderr, "reply failed: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Println(mustJSON(map[string]any{
+		"type":       "agent.reply_sent",
+		"session_id": sessionID,
+	}))
 }
 
 type localSessionHost struct {
