@@ -23,6 +23,9 @@ function Resolve-Go {
 }
 
 $go = Resolve-Go
+if (Test-Path $distRoot) {
+    Remove-Item -Path (Join-Path $distRoot "*") -Recurse -Force
+}
 New-Item -ItemType Directory -Force -Path $distRoot | Out-Null
 & $go build -trimpath -ldflags "-s -w" -o (Join-Path $distRoot "gatepilot-agent.exe") "$repoRoot\agent\cmd\agent"
 if ($LASTEXITCODE -ne 0) {
