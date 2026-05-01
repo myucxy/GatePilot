@@ -13,6 +13,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
 const trayAddr = "127.0.0.1:18731"
@@ -132,6 +134,12 @@ func NewApp() *App {
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
 	_ = a.EnsureAgent()
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		wailsruntime.WindowShow(ctx)
+		wailsruntime.WindowUnminimise(ctx)
+		wailsruntime.WindowCenter(ctx)
+	}()
 }
 
 func (a *App) EnsureAgent() error {

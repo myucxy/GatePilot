@@ -220,6 +220,10 @@ input[type='checkbox'] {
   padding: 18px;
 }
 
+.process-layout {
+  grid-template-columns: 390px minmax(0, 1fr);
+}
+
 .filters {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -269,6 +273,95 @@ input[type='checkbox'] {
   padding-bottom: 14px;
 }
 
+.status-pill {
+  margin-right: 14px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid #d0d7de;
+  background: #f6f8fa;
+  color: #57606a;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.status-pill.running {
+  border-color: #9be9a8;
+  background: #dafbe1;
+  color: #116329;
+}
+
+.status-pill.waiting_approval {
+  border-color: #f7c843;
+  background: #fff8c5;
+  color: #7d4e00;
+}
+
+.status-pill.failed {
+  border-color: #ffcecb;
+  background: #ffebe9;
+  color: #a40e26;
+}
+
+.summary-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  padding: 14px;
+}
+
+.info-card {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid #d8dee4;
+  border-radius: 6px;
+  background: #f6f8fa;
+}
+
+.info-card.wide {
+  grid-column: 1 / -1;
+}
+
+.info-card span {
+  color: #57606a;
+  font-size: 12px;
+}
+
+.info-card strong {
+  overflow-wrap: anywhere;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.panel-section {
+  padding: 0 14px 14px;
+}
+
+.panel-section h3 {
+  margin: 0 0 8px;
+  font-size: 13px;
+}
+
+.panel-section p {
+  margin: 0;
+  padding: 10px;
+  border: 1px solid #d8dee4;
+  border-radius: 6px;
+  background: #f6f8fa;
+  overflow-wrap: anywhere;
+}
+
+.reply-bar {
+  display: flex;
+  gap: 8px;
+  padding: 0 14px 14px;
+}
+
+.reply-bar input {
+  flex: 1;
+}
+
 .kv {
   display: grid;
   grid-template-columns: 120px 1fr;
@@ -302,6 +395,30 @@ input[type='checkbox'] {
 .record-block h3 {
   font-size: 13px;
   margin: 8px 0;
+}
+
+.record-card {
+  margin-bottom: 10px;
+  border: 1px solid #d8dee4;
+  border-radius: 6px;
+  background: #ffffff;
+  overflow: hidden;
+}
+
+.record-card header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 10px;
+  border-bottom: 1px solid #eef1f4;
+  color: #57606a;
+  font-size: 12px;
+}
+
+.record-card pre {
+  margin: 0;
+  border: 0;
+  border-radius: 0;
 }
 
 pre {
