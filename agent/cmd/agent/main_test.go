@@ -7,7 +7,9 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -214,6 +216,24 @@ func TestManagedCLICommandUsesRealCommandExceptFake(t *testing.T) {
 	fake := managedCLICommand(runCLIOptions{CommandArgs: []string{"fake-ai-cli"}})
 	if len(fake.Args) < 2 || fake.Args[1] != "run-fake" {
 		t.Fatalf("fake command args = %+v, want run-fake", fake.Args)
+	}
+}
+
+func TestDefaultGPShimTargetPrefersSiblingGP(t *testing.T) {
+	dir := t.TempDir()
+	agentName := "gatepilot-agent"
+	gpName := "gp"
+	if runtime.GOOS == "windows" {
+		agentName += ".exe"
+		gpName += ".exe"
+	}
+	agentPath := filepath.Join(dir, agentName)
+	gpPath := filepath.Join(dir, gpName)
+	if err := os.WriteFile(gpPath, []byte("gp"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got := defaultGPShimTarget(agentPath); got != gpPath {
+		t.Fatalf("shim target = %q, want %q", got, gpPath)
 	}
 }
 

@@ -50,7 +50,10 @@ New-Item -ItemType Directory -Force -Path $distRoot | Out-Null
 if ($LASTEXITCODE -ne 0) {
     throw "agent build failed"
 }
-Copy-Item -LiteralPath (Join-Path $distRoot "gatepilot-agent.exe") -Destination (Join-Path $distRoot "gp.exe") -Force
+& $go build -trimpath -ldflags "-s -w" -o (Join-Path $distRoot "gp.exe") "$repoRoot\agent\cmd\gp"
+if ($LASTEXITCODE -ne 0) {
+    throw "gp build failed"
+}
 Push-Location (Join-Path $repoRoot "agent\desktop")
 try {
     $env:PATH = "D:\Dev\Env\nvm4w\nodejs;D:\Dev\Env\Go\bin;$env:PATH"

@@ -930,7 +930,7 @@ func installGPCommand(args []string) {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
-		target = exe
+		target = defaultGPShimTarget(exe)
 	}
 	if binDir == "" {
 		localAppData := getenv("LOCALAPPDATA", "")
@@ -965,6 +965,18 @@ func installGPCommand(args []string) {
 		"path_updated": pathUpdated,
 		"usage":        "gp codex 或 gp claude",
 	}))
+}
+
+func defaultGPShimTarget(currentExecutable string) string {
+	gpName := "gp"
+	if runtime.GOOS == "windows" {
+		gpName = "gp.exe"
+	}
+	gpPath := filepath.Join(filepath.Dir(currentExecutable), gpName)
+	if _, err := os.Stat(gpPath); err == nil {
+		return gpPath
+	}
+	return currentExecutable
 }
 
 func addUserPathDirectory(dir string) error {
