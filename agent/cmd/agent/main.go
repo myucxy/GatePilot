@@ -3,11 +3,14 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -15,8 +18,10 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/getlantern/systray"
 	"github.com/gorilla/websocket"
 	"github.com/myucxy/gatepilot/agent/internal/adapter"
 	"github.com/myucxy/gatepilot/agent/internal/localqueue"
@@ -69,6 +74,8 @@ func main() {
 		connectAgent(os.Args[2:])
 	case "local-ui":
 		runLocalUI(os.Args[2:])
+	case "tray":
+		runAgentTray(os.Args[2:])
 	case "flush-queue":
 		flushQueue(os.Args[2:])
 	case "run":
@@ -246,6 +253,476 @@ func parseRunCLIOptions(args []string) runCLIOptions {
 	return options
 }
 
+type agentLocalSettings struct {
+	Mode                 string `json:"mode"`
+	StartOnLogin         bool   `json:"start_on_login"`
+	NotificationEnabled  bool   `json:"notification_enabled"`
+	NotificationStyle    string `json:"notification_style"`
+	HistoryRetentionDays int    `json:"history_retention_days"`
+	CaptureOutputMode    string `json:"capture_output_mode"`
+	DefaultCLIType       string `json:"default_cli_type"`
+	ServerURL            string `json:"server_url"`
+	TenantID             string `json:"tenant_id"`
+	DeviceID             string `json:"device_id"`
+	ClientInstanceID     string `json:"client_instance_id"`
+}
+
+type trayApprovalRequest struct {
+	Approval   localApproval `json:"approval"`
+	WorkingDir string        `json:"working_dir"`
+	Summary    string        `json:"summary"`
+}
+
+type trayDecisionResponse struct {
+	DecisionType string `json:"decision_type"`
+	Payload      string `json:"payload"`
+	Result       string `json:"result"`
+}
+
+type trayPendingApproval struct {
+	Request  trayApprovalRequest
+	Response chan trayDecisionResponse
+}
+
+type trayState struct {
+	mu       sync.Mutex
+	settings agentLocalSettings
+	pending  *trayPendingApproval
+}
+
+func defaultAgentLocalSettings() agentLocalSettings {
+	return agentLocalSettings{
+		Mode:                 "offline",
+		NotificationEnabled:  true,
+		NotificationStyle:    "mini_window",
+		HistoryRetentionDays: 30,
+		CaptureOutputMode:    "summary_only",
+		DefaultCLIType:       "custom",
+	}
+}
+
+func loadAgentLocalSettings() (agentLocalSettings, error) {
+	settings := defaultAgentLocalSettings()
+	path, err := agentSettingsPath()
+	if err != nil {
+		return settings, err
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return settings, nil
+		}
+		return settings, err
+	}
+	if err := json.Unmarshal(body, &settings); err != nil {
+		return settings, err
+	}
+	return normalizeAgentLocalSettings(settings), nil
+}
+
+func saveAgentLocalSettings(settings agentLocalSettings) error {
+	path, err := agentSettingsPath()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return err
+	}
+	settings = normalizeAgentLocalSettings(settings)
+	body, err := json.MarshalIndent(settings, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, body, 0600)
+}
+
+func normalizeAgentLocalSettings(settings agentLocalSettings) agentLocalSettings {
+	defaults := defaultAgentLocalSettings()
+	if settings.Mode == "" {
+		settings.Mode = defaults.Mode
+	}
+	if settings.NotificationStyle == "" {
+		settings.NotificationStyle = defaults.NotificationStyle
+	}
+	if settings.HistoryRetentionDays <= 0 {
+		settings.HistoryRetentionDays = defaults.HistoryRetentionDays
+	}
+	if settings.CaptureOutputMode == "" {
+		settings.CaptureOutputMode = defaults.CaptureOutputMode
+	}
+	if settings.DefaultCLIType == "" {
+		settings.DefaultCLIType = defaults.DefaultCLIType
+	}
+	return settings
+}
+
+func agentSettingsPath() (string, error) {
+	if path := os.Getenv("GATEPILOT_AGENT_SETTINGS"); path != "" {
+		return path, nil
+	}
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(configDir, "GatePilot", "settings.json"), nil
+}
+
+func runAgentTray(args []string) {
+	noUI := false
+	readyFile := ""
+	duration := 0
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--no-ui":
+			noUI = true
+		case "--ready-file":
+			if i+1 < len(args) {
+				readyFile = args[i+1]
+				i++
+			}
+		case "--duration-seconds":
+			if i+1 < len(args) {
+				fmt.Sscanf(args[i+1], "%d", &duration)
+				i++
+			}
+		}
+	}
+
+	settings, err := loadAgentLocalSettings()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "load settings failed: %v\n", err)
+		os.Exit(1)
+	}
+	state := &trayState{settings: settings}
+	server, err := startTrayHTTPServer(state)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "start tray server failed: %v\n", err)
+		os.Exit(1)
+	}
+	defer server.Shutdown(context.Background())
+	if readyFile != "" {
+		if err := os.WriteFile(readyFile, []byte("ready"), 0600); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+	}
+	if noUI {
+		fmt.Println(mustJSON(map[string]any{
+			"type":    "tray.started",
+			"addr":    trayListenAddress(),
+			"mode":    settings.Mode,
+			"no_ui":   true,
+			"version": version,
+		}))
+		if duration > 0 {
+			time.Sleep(time.Duration(duration) * time.Second)
+			return
+		}
+		select {}
+	}
+
+	systray.Run(func() {
+		setupTrayMenu(state)
+	}, func() {
+		_ = server.Shutdown(context.Background())
+	})
+}
+
+func startTrayHTTPServer(state *trayState) (*http.Server, error) {
+	listener, err := net.Listen("tcp", trayListenAddress())
+	if err != nil {
+		return nil, err
+	}
+	server := &http.Server{Handler: newTrayHTTPHandler(state)}
+	go func() {
+		if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
+			fmt.Fprintf(os.Stderr, "tray server stopped: %v\n", err)
+		}
+	}()
+	return server, nil
+}
+
+func newTrayHTTPHandler(state *trayState) http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		writeTrayJSON(w, map[string]any{"status": "ok", "mode": state.currentSettings().Mode})
+	})
+	mux.HandleFunc("/api/local/settings", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			writeTrayJSON(w, map[string]any{"data": state.currentSettings()})
+		case http.MethodPost:
+			var settings agentLocalSettings
+			if err := json.NewDecoder(r.Body).Decode(&settings); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			settings = normalizeAgentLocalSettings(settings)
+			if err := saveAgentLocalSettings(settings); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			state.setSettings(settings)
+			writeTrayJSON(w, map[string]any{"data": settings})
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+	mux.HandleFunc("/api/local/approvals/confirm", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var req trayApprovalRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if req.Approval.ApprovalID == "" {
+			req.Approval.ApprovalID = "local"
+		}
+		decision := state.confirmApproval(req)
+		writeTrayJSON(w, map[string]any{"data": decision})
+	})
+	return mux
+}
+
+func (s *trayState) currentSettings() agentLocalSettings {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.settings
+}
+
+func (s *trayState) setSettings(settings agentLocalSettings) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.settings = settings
+}
+
+func (s *trayState) setPending(req trayApprovalRequest) *trayPendingApproval {
+	pending := &trayPendingApproval{Request: req, Response: make(chan trayDecisionResponse, 1)}
+	s.mu.Lock()
+	s.pending = pending
+	s.mu.Unlock()
+	return pending
+}
+
+func (s *trayState) completePending(decision trayDecisionResponse) bool {
+	s.mu.Lock()
+	pending := s.pending
+	if pending != nil {
+		s.pending = nil
+	}
+	s.mu.Unlock()
+	if pending == nil {
+		return false
+	}
+	pending.Response <- decision
+	return true
+}
+
+func (s *trayState) confirmApproval(req trayApprovalRequest) trayDecisionResponse {
+	settings := s.currentSettings()
+	pending := s.setPending(req)
+	if settings.NotificationEnabled && settings.NotificationStyle != "none" {
+		go func() {
+			decision, payload, err := showConfiguredNotification(settings, req)
+			if err != nil {
+				decision = "reject"
+				payload = ""
+			}
+			s.completePending(trayDecisionResponse{DecisionType: decision, Payload: payload, Result: "selected"})
+		}()
+	}
+	select {
+	case decision := <-pending.Response:
+		return decision
+	case <-time.After(10 * time.Minute):
+		return trayDecisionResponse{DecisionType: "reject", Result: "timeout"}
+	}
+}
+
+func showConfiguredNotification(settings agentLocalSettings, req trayApprovalRequest) (string, string, error) {
+	message := approvalPopupText(req.Approval)
+	if req.WorkingDir != "" {
+		message = "Directory: " + req.WorkingDir + "\n\n" + message
+	}
+	switch settings.NotificationStyle {
+	case "mini_window", "toast":
+		return windowsApprovalMiniWindow(message)
+	default:
+		decision, err := windowsApprovalPopup(message)
+		return decision, "", err
+	}
+}
+
+func setupTrayMenu(state *trayState) {
+	systray.SetIcon(gatePilotTrayIcon())
+	systray.SetTitle("GatePilot")
+	systray.SetTooltip("GatePilot Agent")
+	statusItem := systray.AddMenuItem("离线本地模式", "Current GatePilot Agent mode")
+	statusItem.Disable()
+	systray.AddSeparator()
+	approveItem := systray.AddMenuItem("通过当前审批", "Approve current pending approval")
+	rejectItem := systray.AddMenuItem("拒绝当前审批", "Reject current pending approval")
+	systray.AddSeparator()
+	toggleNotify := systray.AddMenuItem("关闭提醒", "Toggle local approval notifications")
+	settingsItem := systray.AddMenuItem("显示设置路径", "Print settings path")
+	quitItem := systray.AddMenuItem("退出", "Quit GatePilot Agent")
+
+	refresh := func() {
+		settings := state.currentSettings()
+		if settings.Mode == "online" {
+			statusItem.SetTitle("在线模式")
+		} else {
+			statusItem.SetTitle("离线本地模式")
+		}
+		if settings.NotificationEnabled {
+			toggleNotify.SetTitle("关闭提醒")
+		} else {
+			toggleNotify.SetTitle("开启提醒")
+		}
+	}
+	refresh()
+
+	go func() {
+		for range approveItem.ClickedCh {
+			state.completePending(trayDecisionResponse{DecisionType: "approve", Result: "tray_menu"})
+		}
+	}()
+	go func() {
+		for range rejectItem.ClickedCh {
+			state.completePending(trayDecisionResponse{DecisionType: "reject", Result: "tray_menu"})
+		}
+	}()
+	go func() {
+		for range toggleNotify.ClickedCh {
+			settings := state.currentSettings()
+			settings.NotificationEnabled = !settings.NotificationEnabled
+			if err := saveAgentLocalSettings(settings); err == nil {
+				state.setSettings(settings)
+			}
+			refresh()
+		}
+	}()
+	go func() {
+		for range settingsItem.ClickedCh {
+			if path, err := agentSettingsPath(); err == nil {
+				fmt.Println(path)
+			}
+		}
+	}()
+	go func() {
+		<-quitItem.ClickedCh
+		systray.Quit()
+	}()
+}
+
+func gatePilotTrayIcon() []byte {
+	const width = 16
+	const height = 16
+	const pixelBytes = width * height * 4
+	const maskBytes = ((width + 31) / 32) * 4 * height
+	const dibBytes = 40 + pixelBytes + maskBytes
+	const imageOffset = 6 + 16
+
+	var buffer bytes.Buffer
+	_ = binary.Write(&buffer, binary.LittleEndian, uint16(0))
+	_ = binary.Write(&buffer, binary.LittleEndian, uint16(1))
+	_ = binary.Write(&buffer, binary.LittleEndian, uint16(1))
+	buffer.WriteByte(width)
+	buffer.WriteByte(height)
+	buffer.WriteByte(0)
+	buffer.WriteByte(0)
+	_ = binary.Write(&buffer, binary.LittleEndian, uint16(1))
+	_ = binary.Write(&buffer, binary.LittleEndian, uint16(32))
+	_ = binary.Write(&buffer, binary.LittleEndian, uint32(dibBytes))
+	_ = binary.Write(&buffer, binary.LittleEndian, uint32(imageOffset))
+
+	_ = binary.Write(&buffer, binary.LittleEndian, uint32(40))
+	_ = binary.Write(&buffer, binary.LittleEndian, int32(width))
+	_ = binary.Write(&buffer, binary.LittleEndian, int32(height*2))
+	_ = binary.Write(&buffer, binary.LittleEndian, uint16(1))
+	_ = binary.Write(&buffer, binary.LittleEndian, uint16(32))
+	_ = binary.Write(&buffer, binary.LittleEndian, uint32(0))
+	_ = binary.Write(&buffer, binary.LittleEndian, uint32(pixelBytes+maskBytes))
+	_ = binary.Write(&buffer, binary.LittleEndian, int32(0))
+	_ = binary.Write(&buffer, binary.LittleEndian, int32(0))
+	_ = binary.Write(&buffer, binary.LittleEndian, uint32(0))
+	_ = binary.Write(&buffer, binary.LittleEndian, uint32(0))
+
+	for y := 0; y < height; y++ {
+		for x := 0; x < width; x++ {
+			inset := x > 1 && x < width-2 && y > 1 && y < height-2
+			if inset {
+				buffer.Write([]byte{0x42, 0xa5, 0x22, 0xff})
+			} else {
+				buffer.Write([]byte{0xf0, 0xf0, 0xf0, 0xff})
+			}
+		}
+	}
+	buffer.Write(make([]byte, maskBytes))
+	return buffer.Bytes()
+}
+
+func requestTrayDecision(approval localApproval, workingDir string, output io.Writer) (string, string, error) {
+	req := trayApprovalRequest{Approval: approval, WorkingDir: workingDir, Summary: approval.PromptText}
+	body, err := json.Marshal(req)
+	if err != nil {
+		return "", "", err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+trayListenAddress()+"/api/local/approvals/confirm", bytes.NewReader(body))
+	if err != nil {
+		return "", "", err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(httpReq)
+	if err != nil {
+		return "", "", err
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 300 {
+		return "", "", fmt.Errorf("%s: %s", resp.Status, string(respBody))
+	}
+	var decoded struct {
+		Data trayDecisionResponse `json:"data"`
+	}
+	if err := json.Unmarshal(respBody, &decoded); err != nil {
+		return "", "", err
+	}
+	if decoded.Data.DecisionType == "" {
+		return "", "", fmt.Errorf("tray decision missing")
+	}
+	if output != nil {
+		fmt.Fprintln(output, mustJSON(map[string]any{
+			"type":          "tray.decision_received",
+			"decision_type": decoded.Data.DecisionType,
+			"result":        decoded.Data.Result,
+		}))
+	}
+	return decoded.Data.DecisionType, decoded.Data.Payload, nil
+}
+
+func trayListenAddress() string {
+	return getenv("GATEPILOT_AGENT_TRAY_ADDR", "127.0.0.1:18731")
+}
+
+func writeTrayJSON(w http.ResponseWriter, value any) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(value)
+}
+
+func currentWorkingDir() string {
+	wd, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	return wd
+}
+
 func confirmLocalApproval(writer io.Writer, cliAdapter adapter.CLIAdapter, event adapter.DetectedEvent, options localUIOptions, reader io.Reader, output io.Writer) (string, int, error) {
 	approval := localApproval{
 		ApprovalID:    "local",
@@ -261,6 +738,16 @@ func confirmLocalApproval(writer io.Writer, cliAdapter adapter.CLIAdapter, event
 	}
 	notifyLocalApproval(output, approval)
 	options.PopupText = approvalPopupText(approval)
+	if strings.TrimSpace(options.DecisionType) == "" && !options.Popup {
+		if decision, payload, err := requestTrayDecision(approval, currentWorkingDir(), output); err == nil {
+			options.DecisionType = decision
+			options.Payload = payload
+			fmt.Fprintln(output, mustJSON(map[string]any{
+				"type":          "local_ui.tray_decision",
+				"decision_type": decision,
+			}))
+		}
+	}
 	decisionType, payload, err := localDecisionInput(options, reader, output)
 	if err != nil {
 		return "write_failed", 0, err
@@ -932,6 +1419,99 @@ if ($result -eq [System.Windows.Forms.DialogResult]::Yes) { "approve" } else { "
 		return decision, nil
 	default:
 		return "", fmt.Errorf("unexpected popup result %q", decision)
+	}
+}
+
+func windowsApprovalMiniWindow(message string) (string, string, error) {
+	if override := strings.TrimSpace(os.Getenv("GATEPILOT_AGENT_POPUP_DECISION")); override != "" {
+		switch override {
+		case "approve", "reject":
+			return override, "", nil
+		default:
+			return "", "", fmt.Errorf("unsupported popup override %q", override)
+		}
+	}
+	if runtime.GOOS != "windows" {
+		return "", "", fmt.Errorf("windows mini window is only available on Windows")
+	}
+	if strings.TrimSpace(message) == "" {
+		message = "GatePilot needs your confirmation."
+	}
+	script := `$ErrorActionPreference = "Stop"
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+Add-Type -AssemblyName Microsoft.VisualBasic
+$form = New-Object System.Windows.Forms.Form
+$form.Text = "GatePilot Approval"
+$form.Width = 420
+$form.Height = 250
+$form.TopMost = $true
+$form.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedDialog
+$form.MaximizeBox = $false
+$form.MinimizeBox = $false
+$screen = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+$form.StartPosition = [System.Windows.Forms.FormStartPosition]::Manual
+$form.Location = New-Object System.Drawing.Point(($screen.Right - $form.Width - 16), ($screen.Bottom - $form.Height - 16))
+$label = New-Object System.Windows.Forms.Label
+$label.AutoSize = $false
+$label.Left = 16
+$label.Top = 16
+$label.Width = 372
+$label.Height = 145
+$label.Text = $env:GATEPILOT_POPUP_TEXT
+$label.Font = New-Object System.Drawing.Font("Segoe UI", 9)
+$form.Controls.Add($label)
+$script:decision = "reject"
+$script:payload = ""
+$approve = New-Object System.Windows.Forms.Button
+$approve.Text = "通过"
+$approve.Width = 92
+$approve.Height = 30
+$approve.Left = 96
+$approve.Top = 176
+$approve.Add_Click({ $script:decision = "approve"; $form.Close() })
+$form.Controls.Add($approve)
+$reject = New-Object System.Windows.Forms.Button
+$reject.Text = "拒绝"
+$reject.Width = 92
+$reject.Height = 30
+$reject.Left = 196
+$reject.Top = 176
+$reject.Add_Click({ $script:decision = "reject"; $form.Close() })
+$form.Controls.Add($reject)
+$reply = New-Object System.Windows.Forms.Button
+$reply.Text = "其他"
+$reply.Width = 92
+$reply.Height = 30
+$reply.Left = 296
+$reply.Top = 176
+$reply.Add_Click({
+  $text = [Microsoft.VisualBasic.Interaction]::InputBox("输入要回复给 CLI 的内容", "GatePilot Reply", "")
+  if ($text.Length -gt 0) { $script:decision = "reply"; $script:payload = $text; $form.Close() }
+})
+$form.Controls.Add($reply)
+$form.AcceptButton = $approve
+$form.CancelButton = $reject
+[void]$form.ShowDialog()
+[pscustomobject]@{ decision_type = $script:decision; payload = $script:payload } | ConvertTo-Json -Compress`
+	cmd := exec.Command("powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-STA", "-Command", script)
+	cmd.Env = append(os.Environ(), "GATEPILOT_POPUP_TEXT="+message)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", "", fmt.Errorf("%v: %s", err, strings.TrimSpace(string(output)))
+	}
+	var result struct {
+		DecisionType string `json:"decision_type"`
+		Payload      string `json:"payload"`
+	}
+	if err := json.Unmarshal(output, &result); err != nil {
+		return "", "", err
+	}
+	switch result.DecisionType {
+	case "approve", "reject", "reply":
+		return result.DecisionType, result.Payload, nil
+	default:
+		return "", "", fmt.Errorf("unexpected mini window result %q", result.DecisionType)
 	}
 }
 

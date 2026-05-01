@@ -213,6 +213,83 @@ func TestLocalDecisionInputUsesPopupDecisionOverride(t *testing.T) {
 	}
 }
 
+func TestAgentLocalSettingsDefaultsOffline(t *testing.T) {
+	settings := defaultAgentLocalSettings()
+	if settings.Mode != "offline" || !settings.NotificationEnabled || settings.NotificationStyle != "mini_window" {
+		t.Fatalf("settings = %+v, want offline mini-window notifications enabled", settings)
+	}
+}
+
+func TestTrayConfirmApprovalUsesNotificationDecision(t *testing.T) {
+	t.Setenv("GATEPILOT_AGENT_POPUP_DECISION", "approve")
+	state := &trayState{settings: defaultAgentLocalSettings()}
+	server := httptest.NewServer(newTrayHTTPHandler(state))
+	defer server.Close()
+
+	body, err := json.Marshal(trayApprovalRequest{
+		Approval: localApproval{
+			ApprovalID: "approval-1",
+			CLIType:    "custom",
+			EventType:  "permission_request",
+			RiskLevel:  "high",
+			PromptText: "allow command?",
+		},
+		WorkingDir: "E:\\WorkSpace\\AICodeProject\\GatePilot",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.Post(server.URL+"/api/local/approvals/confirm", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	var decoded struct {
+		Data trayDecisionResponse `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Data.DecisionType != "approve" || decoded.Data.Result != "selected" {
+		t.Fatalf("decision = %+v, want selected approve", decoded.Data)
+	}
+}
+
+func TestTraySettingsHandlerPersistsSettings(t *testing.T) {
+	settingsPath := filepath.Join(t.TempDir(), "settings.json")
+	t.Setenv("GATEPILOT_AGENT_SETTINGS", settingsPath)
+	state := &trayState{settings: defaultAgentLocalSettings()}
+	server := httptest.NewServer(newTrayHTTPHandler(state))
+	defer server.Close()
+
+	body, err := json.Marshal(agentLocalSettings{
+		Mode:                "offline",
+		NotificationEnabled: false,
+		NotificationStyle:   "none",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.Post(server.URL+"/api/local/settings", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	loaded, err := loadAgentLocalSettings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.NotificationEnabled || loaded.NotificationStyle != "none" || loaded.HistoryRetentionDays != 30 {
+		t.Fatalf("loaded settings = %+v, want persisted none notifications with defaults", loaded)
+	}
+}
+
 func TestConfirmLocalApprovalWritesDecisionInput(t *testing.T) {
 	var decisionSink bytes.Buffer
 	var output bytes.Buffer
