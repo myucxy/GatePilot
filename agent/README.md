@@ -4,6 +4,8 @@ Minimal M0 Agent skeleton.
 
 Built-in adapter coverage now includes `custom`, `codex`, `claude_code`, `opencode`, `copilot`, and `gemini` prompt detection plus decision input mapping tests.
 
+`agent/desktop` contains the Wails + React + TypeScript desktop shell. In packaged builds, start `gatepilot-agent-desktop.exe` for the desktop UI; it starts or connects to `gatepilot-agent.exe tray` automatically.
+
 ```powershell
 D:\Dev\Env\Go\bin\go.exe run .\cmd\agent
 D:\Dev\Env\Go\bin\go.exe run .\cmd\agent version

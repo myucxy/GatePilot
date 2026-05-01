@@ -22,7 +22,26 @@ function Resolve-Go {
     throw "go executable not found. Set GATEPILOT_GO to the full go.exe path."
 }
 
+function Resolve-Wails {
+    if ($env:GATEPILOT_WAILS -and (Test-Path $env:GATEPILOT_WAILS)) {
+        return $env:GATEPILOT_WAILS
+    }
+
+    $defaultWails = "D:\Dev\Env\Go\bin\wails.exe"
+    if (Test-Path $defaultWails) {
+        return $defaultWails
+    }
+
+    $pathWails = Get-Command wails -ErrorAction SilentlyContinue
+    if ($pathWails) {
+        return $pathWails.Source
+    }
+
+    throw "wails executable not found. Install it with: `$env:GOBIN='D:\Dev\Env\Go\bin'; D:\Dev\Env\Go\bin\go.exe install github.com/wailsapp/wails/v2/cmd/wails@latest"
+}
+
 $go = Resolve-Go
+$wails = Resolve-Wails
 if (Test-Path $distRoot) {
     Remove-Item -Path (Join-Path $distRoot "*") -Recurse -Force
 }
@@ -31,9 +50,29 @@ New-Item -ItemType Directory -Force -Path $distRoot | Out-Null
 if ($LASTEXITCODE -ne 0) {
     throw "agent build failed"
 }
+Push-Location (Join-Path $repoRoot "agent\desktop")
+try {
+    $env:PATH = "D:\Dev\Env\nvm4w\nodejs;D:\Dev\Env\Go\bin;$env:PATH"
+    & $wails build
+    if ($LASTEXITCODE -ne 0) {
+        throw "desktop build failed"
+    }
+}
+finally {
+    Pop-Location
+}
+Copy-Item -LiteralPath (Join-Path $repoRoot "agent\desktop\build\bin\gatepilot-agent-desktop.exe") -Destination (Join-Path $distRoot "gatepilot-agent-desktop.exe") -Force
 
 $readme = @'
 # GatePilot Agent Windows AMD64
+
+Desktop UI:
+
+```powershell
+.\gatepilot-agent-desktop.exe
+```
+
+The desktop UI starts or connects to `gatepilot-agent.exe tray` automatically.
 
 Offline local confirmation:
 
@@ -75,5 +114,6 @@ Compress-Archive -Path (Join-Path $distRoot "*") -DestinationPath $packagePath
 
 [pscustomobject]@{
     executable = Join-Path $distRoot "gatepilot-agent.exe"
+    desktop = Join-Path $distRoot "gatepilot-agent-desktop.exe"
     package = $packagePath
 } | ConvertTo-Json

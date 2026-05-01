@@ -336,11 +336,12 @@ MVP 建议：
 - `agent history`、托盘 API 和托盘历史页已支持会话列表、详情、CLI/状态筛选。
 - `agent reply` 和历史页已支持对仍在运行的本地托管会话继续输入。
 - `login`、`offline`、`logout`、`settings`、`status` 已提供基础桌面配置入口。
+- `agent/desktop` 已新增 Wails + React + TypeScript 桌面壳，打包产物 `gatepilot-agent-desktop.exe` 可启动/连接本地 Agent Core 并管理设置、历史和继续回复。
 
 仍需补齐：
 
 - 在线模式下，托盘进程还未自动承担 `local-ui` 的服务端审批监听与提交职责。
-- 登录仍是命令/API 配置入口，尚未做完整桌面登录窗口。
-- 历史页已有列表、详情、状态/CLI 筛选和继续回复，仍缺全文搜索、时间筛选和更完整的多 Agent 视图。
+- 桌面 UI 已有登录/绑定表单，仍需接入更完整的 OAuth/OIDC 登录流程。
+- 历史 UI 已有列表、详情、状态/CLI 筛选和继续回复，仍缺全文搜索、时间筛选和更完整的多 Agent 视图。
 - CLI 实际命令托管仍是 fake CLI 占位，真实 ConPTY 托管需要补齐。
 - 开机启动已写入当前用户 Run key，仍需补 Windows 手工矩阵验证。

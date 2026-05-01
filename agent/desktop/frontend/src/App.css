@@ -1,0 +1,302 @@
+.app-shell {
+  display: grid;
+  grid-template-columns: 260px 1fr;
+  min-height: 100vh;
+  background: #f6f8fa;
+  color: #1f2328;
+}
+
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 16px;
+  border-right: 1px solid #d8dee4;
+  background: #ffffff;
+}
+
+.brand {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  margin-bottom: 18px;
+}
+
+.mark {
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 8px;
+  background: #116329;
+  color: #ffffff;
+  font-weight: 700;
+}
+
+.brand h1 {
+  margin: 0;
+  font-size: 17px;
+}
+
+.brand p,
+.topbar span,
+.paths span,
+.session span,
+.session small,
+.empty,
+label {
+  color: #57606a;
+  font-size: 13px;
+}
+
+.nav,
+button,
+input,
+select {
+  font: inherit;
+  border: 1px solid #c8d0d9;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #1f2328;
+}
+
+.nav {
+  height: 36px;
+  text-align: left;
+  padding: 0 12px;
+}
+
+.nav.active {
+  border-color: #0969da;
+  background: #ddf4ff;
+}
+
+.paths {
+  margin-top: auto;
+  display: grid;
+  gap: 6px;
+}
+
+code {
+  font-family: Consolas, monospace;
+  font-size: 12px;
+  word-break: break-all;
+}
+
+.content {
+  min-width: 0;
+}
+
+.topbar {
+  height: 56px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 18px;
+  border-bottom: 1px solid #d8dee4;
+  background: #ffffff;
+}
+
+.topbar div {
+  display: grid;
+  gap: 3px;
+}
+
+button {
+  height: 34px;
+  padding: 0 12px;
+  cursor: pointer;
+}
+
+button.primary {
+  border-color: #116329;
+  background: #116329;
+  color: #ffffff;
+}
+
+button.danger {
+  border-color: #a40e26;
+  background: #a40e26;
+  color: #ffffff;
+}
+
+input,
+select {
+  height: 34px;
+  padding: 0 8px;
+  min-width: 0;
+}
+
+input[type='checkbox'] {
+  width: 18px;
+  height: 18px;
+}
+
+.notice {
+  margin: 14px 18px 0;
+  padding: 10px 12px;
+  border-radius: 6px;
+  font-size: 13px;
+}
+
+.notice.ok {
+  border: 1px solid #a7f3be;
+  background: #dafbe1;
+  color: #116329;
+}
+
+.notice.error {
+  border: 1px solid #ffcecb;
+  background: #ffebe9;
+  color: #a40e26;
+}
+
+.page-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 14px;
+  padding: 18px;
+}
+
+.panel {
+  border: 1px solid #d8dee4;
+  border-radius: 8px;
+  background: #ffffff;
+  overflow: hidden;
+}
+
+.panel h2 {
+  margin: 0;
+  padding: 12px 14px;
+  border-bottom: 1px solid #eef1f4;
+  font-size: 15px;
+}
+
+.form-grid {
+  display: grid;
+  grid-template-columns: 160px 1fr;
+  gap: 12px 14px;
+  align-items: center;
+  padding: 14px;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 0 14px 14px;
+}
+
+.history-layout {
+  display: grid;
+  grid-template-columns: 360px minmax(0, 1fr);
+  gap: 14px;
+  padding: 18px;
+}
+
+.filters {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  padding: 12px;
+  border-bottom: 1px solid #eef1f4;
+}
+
+.session-list {
+  max-height: calc(100vh - 140px);
+  overflow: auto;
+}
+
+.session {
+  display: grid;
+  gap: 4px;
+  width: 100%;
+  height: auto;
+  padding: 12px;
+  text-align: left;
+  border: 0;
+  border-bottom: 1px solid #eef1f4;
+  border-radius: 0;
+}
+
+.session.active,
+.session:hover {
+  background: #ddf4ff;
+}
+
+.session strong,
+.session small {
+  overflow-wrap: anywhere;
+}
+
+.detail-panel {
+  padding-bottom: 14px;
+}
+
+.kv {
+  display: grid;
+  grid-template-columns: 120px 1fr;
+  gap: 8px 12px;
+  padding: 14px;
+}
+
+.kv span {
+  color: #57606a;
+}
+
+.kv strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.reply {
+  display: flex;
+  gap: 8px;
+  padding: 0 14px 14px;
+}
+
+.reply input {
+  flex: 1;
+}
+
+.record-block {
+  padding: 0 14px 14px;
+}
+
+.record-block h3 {
+  font-size: 13px;
+  margin: 8px 0;
+}
+
+pre {
+  margin: 0 0 8px;
+  padding: 10px;
+  border: 1px solid #d8dee4;
+  border-radius: 6px;
+  background: #f6f8fa;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+}
+
+.empty {
+  padding: 18px;
+}
+
+@media (max-width: 860px) {
+  .app-shell,
+  .page-grid,
+  .history-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .sidebar {
+    border-right: 0;
+    border-bottom: 1px solid #d8dee4;
+  }
+
+  .form-grid,
+  .kv {
+    grid-template-columns: 1fr;
+  }
+}
