@@ -261,6 +261,14 @@ func TestTrayConfirmApprovalUsesNotificationDecision(t *testing.T) {
 func TestTraySettingsHandlerPersistsSettings(t *testing.T) {
 	settingsPath := filepath.Join(t.TempDir(), "settings.json")
 	t.Setenv("GATEPILOT_AGENT_SETTINGS", settingsPath)
+	previousStartup := configureStartupRegistration
+	startupCalls := []bool{}
+	configureStartupRegistration = func(enabled bool) error {
+		startupCalls = append(startupCalls, enabled)
+		return nil
+	}
+	defer func() { configureStartupRegistration = previousStartup }()
+
 	state := &trayState{settings: defaultAgentLocalSettings()}
 	server := httptest.NewServer(newTrayHTTPHandler(state))
 	defer server.Close()
@@ -287,6 +295,32 @@ func TestTraySettingsHandlerPersistsSettings(t *testing.T) {
 	}
 	if loaded.NotificationEnabled || loaded.NotificationStyle != "none" || loaded.HistoryRetentionDays != 30 {
 		t.Fatalf("loaded settings = %+v, want persisted none notifications with defaults", loaded)
+	}
+	if len(startupCalls) != 0 {
+		t.Fatalf("startup calls = %+v, want none when start_on_login did not change", startupCalls)
+	}
+}
+
+func TestSettingsStartupChangeAppliesRegistration(t *testing.T) {
+	t.Setenv("GATEPILOT_AGENT_SETTINGS", filepath.Join(t.TempDir(), "settings.json"))
+	previousStartup := configureStartupRegistration
+	startupCalls := []bool{}
+	configureStartupRegistration = func(enabled bool) error {
+		startupCalls = append(startupCalls, enabled)
+		return nil
+	}
+	defer func() { configureStartupRegistration = previousStartup }()
+
+	settings := applyAgentSettingsUpdate(defaultAgentLocalSettings(), agentSettingsUpdate{StartOnLogin: boolPtr(true)})
+	if err := saveAgentLocalSettingsWithStartup(settings); err != nil {
+		t.Fatal(err)
+	}
+	settings = applyAgentSettingsUpdate(settings, agentSettingsUpdate{StartOnLogin: boolPtr(false)})
+	if err := saveAgentLocalSettingsWithStartup(settings); err != nil {
+		t.Fatal(err)
+	}
+	if len(startupCalls) != 2 || !startupCalls[0] || startupCalls[1] {
+		t.Fatalf("startup calls = %+v, want enable then disable", startupCalls)
 	}
 }
 
@@ -577,4 +611,8 @@ func TestUpdateSessionStatusPostsLifecyclePayload(t *testing.T) {
 	if received != 1 {
 		t.Fatalf("received = %d, want 1", received)
 	}
+}
+
+func boolPtr(value bool) *bool {
+	return &value
 }

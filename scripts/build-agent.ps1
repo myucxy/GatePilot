@@ -43,6 +43,8 @@ Offline local confirmation:
 .\gatepilot-agent.exe run --local-only --decision approve -- fake-ai-cli
 .\gatepilot-agent.exe run --local-only --popup -- fake-ai-cli
 .\gatepilot-agent.exe status
+.\gatepilot-agent.exe settings --notification-enabled true --notification-style mini_window
+.\gatepilot-agent.exe settings --start-on-login true
 .\gatepilot-agent.exe history
 .\gatepilot-agent.exe history --cli-type codex --status running --limit 20
 .\gatepilot-agent.exe reply --session-id <session_id> --text "continue"

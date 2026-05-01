@@ -40,6 +40,7 @@ type agentConfig struct {
 }
 
 var deliveryDecisionWriter io.Writer = io.Discard
+var configureStartupRegistration = setWindowsStartOnLogin
 
 type runCLIOptions struct {
 	CLIType     string
@@ -80,6 +81,8 @@ func main() {
 		printLocalHistory(os.Args[2:])
 	case "reply":
 		replyLocalSession(os.Args[2:])
+	case "settings":
+		configureAgentSettings(os.Args[2:])
 	case "status":
 		printAgentStatus()
 	case "login":
@@ -384,6 +387,17 @@ type agentLoginOptions struct {
 	ClientInstanceID string `json:"client_instance_id"`
 }
 
+type agentSettingsUpdate struct {
+	Mode                 string
+	StartOnLogin         *bool
+	NotificationEnabled  *bool
+	NotificationStyle    string
+	HistoryRetentionDays int
+	CaptureOutputMode    string
+	DefaultCLIType       string
+	ServerURL            string
+}
+
 type trayApprovalRequest struct {
 	Approval   localApproval `json:"approval"`
 	WorkingDir string        `json:"working_dir"`
@@ -457,12 +471,33 @@ func saveAgentLocalSettings(settings agentLocalSettings) error {
 	return os.WriteFile(path, body, 0600)
 }
 
+func saveAgentLocalSettingsWithStartup(settings agentLocalSettings) error {
+	previous, _ := loadAgentLocalSettings()
+	if err := saveAgentLocalSettings(settings); err != nil {
+		return err
+	}
+	if previous.StartOnLogin == settings.StartOnLogin {
+		return nil
+	}
+	return configureStartupRegistration(settings.StartOnLogin)
+}
+
 func normalizeAgentLocalSettings(settings agentLocalSettings) agentLocalSettings {
 	defaults := defaultAgentLocalSettings()
 	if settings.Mode == "" {
 		settings.Mode = defaults.Mode
 	}
+	switch settings.Mode {
+	case "offline", "online":
+	default:
+		settings.Mode = defaults.Mode
+	}
 	if settings.NotificationStyle == "" {
+		settings.NotificationStyle = defaults.NotificationStyle
+	}
+	switch settings.NotificationStyle {
+	case "none", "toast", "mini_window", "modal_popup":
+	default:
 		settings.NotificationStyle = defaults.NotificationStyle
 	}
 	if settings.HistoryRetentionDays <= 0 {
@@ -471,8 +506,15 @@ func normalizeAgentLocalSettings(settings agentLocalSettings) agentLocalSettings
 	if settings.CaptureOutputMode == "" {
 		settings.CaptureOutputMode = defaults.CaptureOutputMode
 	}
+	switch settings.CaptureOutputMode {
+	case "summary_only", "redacted_recent", "full_local_only":
+	default:
+		settings.CaptureOutputMode = defaults.CaptureOutputMode
+	}
 	if settings.DefaultCLIType == "" {
 		settings.DefaultCLIType = defaults.DefaultCLIType
+	} else {
+		settings.DefaultCLIType = adapter.NormalizeCLIType(settings.DefaultCLIType)
 	}
 	return settings
 }
@@ -486,6 +528,32 @@ func agentSettingsPath() (string, error) {
 		return "", err
 	}
 	return filepath.Join(configDir, "GatePilot", "settings.json"), nil
+}
+
+func setWindowsStartOnLogin(enabled bool) error {
+	if runtime.GOOS != "windows" {
+		return nil
+	}
+	const runKey = `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`
+	const valueName = "GatePilot Agent"
+	if !enabled {
+		cmd := exec.Command("reg.exe", "delete", runKey, "/v", valueName, "/f")
+		output, err := cmd.CombinedOutput()
+		if err != nil && !strings.Contains(strings.ToLower(string(output)), "unable to find") {
+			return fmt.Errorf("disable start on login: %v: %s", err, strings.TrimSpace(string(output)))
+		}
+		return nil
+	}
+	exePath, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	commandLine := `"` + exePath + `" tray`
+	cmd := exec.Command("reg.exe", "add", runKey, "/v", valueName, "/t", "REG_SZ", "/d", commandLine, "/f")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("enable start on login: %v: %s", err, strings.TrimSpace(string(output)))
+	}
+	return nil
 }
 
 func parseAgentLoginOptions(args []string) agentLoginOptions {
@@ -515,6 +583,149 @@ func parseAgentLoginOptions(args []string) agentLoginOptions {
 		}
 	}
 	return options
+}
+
+func parseAgentSettingsUpdate(args []string) (agentSettingsUpdate, bool, error) {
+	update := agentSettingsUpdate{}
+	changed := false
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--mode":
+			if i+1 >= len(args) {
+				return update, changed, fmt.Errorf("--mode requires a value")
+			}
+			update.Mode = args[i+1]
+			changed = true
+			i++
+		case "--start-on-login":
+			if i+1 >= len(args) {
+				return update, changed, fmt.Errorf("--start-on-login requires true or false")
+			}
+			value, err := parseBoolSetting(args[i+1])
+			if err != nil {
+				return update, changed, err
+			}
+			update.StartOnLogin = &value
+			changed = true
+			i++
+		case "--notification-enabled":
+			if i+1 >= len(args) {
+				return update, changed, fmt.Errorf("--notification-enabled requires true or false")
+			}
+			value, err := parseBoolSetting(args[i+1])
+			if err != nil {
+				return update, changed, err
+			}
+			update.NotificationEnabled = &value
+			changed = true
+			i++
+		case "--notification-style":
+			if i+1 >= len(args) {
+				return update, changed, fmt.Errorf("--notification-style requires a value")
+			}
+			update.NotificationStyle = args[i+1]
+			changed = true
+			i++
+		case "--history-retention-days":
+			if i+1 >= len(args) {
+				return update, changed, fmt.Errorf("--history-retention-days requires a value")
+			}
+			if _, err := fmt.Sscanf(args[i+1], "%d", &update.HistoryRetentionDays); err != nil {
+				return update, changed, fmt.Errorf("invalid --history-retention-days %q", args[i+1])
+			}
+			changed = true
+			i++
+		case "--capture-output-mode":
+			if i+1 >= len(args) {
+				return update, changed, fmt.Errorf("--capture-output-mode requires a value")
+			}
+			update.CaptureOutputMode = args[i+1]
+			changed = true
+			i++
+		case "--default-cli-type":
+			if i+1 >= len(args) {
+				return update, changed, fmt.Errorf("--default-cli-type requires a value")
+			}
+			update.DefaultCLIType = args[i+1]
+			changed = true
+			i++
+		case "--server-url":
+			if i+1 >= len(args) {
+				return update, changed, fmt.Errorf("--server-url requires a value")
+			}
+			update.ServerURL = args[i+1]
+			changed = true
+			i++
+		default:
+			return update, changed, fmt.Errorf("unknown settings option %q", args[i])
+		}
+	}
+	return update, changed, nil
+}
+
+func configureAgentSettings(args []string) {
+	update, changed, err := parseAgentSettingsUpdate(args)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "settings failed: %v\n", err)
+		os.Exit(2)
+	}
+	settings, err := loadAgentLocalSettings()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "settings failed: %v\n", err)
+		os.Exit(1)
+	}
+	if changed {
+		settings = applyAgentSettingsUpdate(settings, update)
+		if err := saveAgentLocalSettingsWithStartup(settings); err != nil {
+			fmt.Fprintf(os.Stderr, "settings failed: %v\n", err)
+			os.Exit(1)
+		}
+		settings = normalizeAgentLocalSettings(settings)
+	}
+	fmt.Println(mustJSON(map[string]any{
+		"type":      "agent.settings",
+		"settings":  settings,
+		"logged_in": agentSettingsLoggedIn(settings),
+	}))
+}
+
+func applyAgentSettingsUpdate(settings agentLocalSettings, update agentSettingsUpdate) agentLocalSettings {
+	if update.Mode != "" {
+		settings.Mode = update.Mode
+	}
+	if update.StartOnLogin != nil {
+		settings.StartOnLogin = *update.StartOnLogin
+	}
+	if update.NotificationEnabled != nil {
+		settings.NotificationEnabled = *update.NotificationEnabled
+	}
+	if update.NotificationStyle != "" {
+		settings.NotificationStyle = update.NotificationStyle
+	}
+	if update.HistoryRetentionDays > 0 {
+		settings.HistoryRetentionDays = update.HistoryRetentionDays
+	}
+	if update.CaptureOutputMode != "" {
+		settings.CaptureOutputMode = update.CaptureOutputMode
+	}
+	if update.DefaultCLIType != "" {
+		settings.DefaultCLIType = update.DefaultCLIType
+	}
+	if update.ServerURL != "" {
+		settings.ServerURL = update.ServerURL
+	}
+	return normalizeAgentLocalSettings(settings)
+}
+
+func parseBoolSetting(value string) (bool, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "1", "true", "yes", "on", "enabled":
+		return true, nil
+	case "0", "false", "no", "off", "disabled":
+		return false, nil
+	default:
+		return false, fmt.Errorf("invalid boolean setting %q", value)
+	}
 }
 
 func loginAgentDesktop(args []string) {
@@ -609,7 +820,7 @@ func configureAgentDesktopLogin(options agentLoginOptions) (agentLocalSettings, 
 	settings.TenantID = options.TenantID
 	settings.DeviceID = options.DeviceID
 	settings.ClientInstanceID = options.ClientInstanceID
-	if err := saveAgentLocalSettings(settings); err != nil {
+	if err := saveAgentLocalSettingsWithStartup(settings); err != nil {
 		return settings, err
 	}
 	return normalizeAgentLocalSettings(settings), nil
@@ -624,7 +835,7 @@ func clearAgentDesktopLogin() (agentLocalSettings, error) {
 	settings.TenantID = ""
 	settings.DeviceID = ""
 	settings.ClientInstanceID = ""
-	if err := saveAgentLocalSettings(settings); err != nil {
+	if err := saveAgentLocalSettingsWithStartup(settings); err != nil {
 		return settings, err
 	}
 	return normalizeAgentLocalSettings(settings), nil
@@ -636,7 +847,7 @@ func setAgentOfflineMode() (agentLocalSettings, error) {
 		return settings, err
 	}
 	settings.Mode = "offline"
-	if err := saveAgentLocalSettings(settings); err != nil {
+	if err := saveAgentLocalSettingsWithStartup(settings); err != nil {
 		return settings, err
 	}
 	return normalizeAgentLocalSettings(settings), nil
@@ -761,7 +972,7 @@ func newTrayHTTPHandler(state *trayState) http.Handler {
 				return
 			}
 			settings = normalizeAgentLocalSettings(settings)
-			if err := saveAgentLocalSettings(settings); err != nil {
+			if err := saveAgentLocalSettingsWithStartup(settings); err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
@@ -974,6 +1185,7 @@ func setupTrayMenu(state *trayState) {
 	systray.AddSeparator()
 	toggleNotify := systray.AddMenuItem("关闭提醒", "Toggle local approval notifications")
 	toggleOffline := systray.AddMenuItem("切换离线/在线模式", "Toggle offline mode when login settings are present")
+	toggleStartup := systray.AddMenuItem("开启开机启动", "Toggle Windows start on login")
 	historyItem := systray.AddMenuItem("显示历史路径", "Print local history path")
 	settingsItem := systray.AddMenuItem("显示设置路径", "Print settings path")
 	loginItem := systray.AddMenuItem("登录/切换账号", "Print login command help")
@@ -996,6 +1208,11 @@ func setupTrayMenu(state *trayState) {
 		} else {
 			toggleOffline.SetTitle("切换为在线模式")
 		}
+		if settings.StartOnLogin {
+			toggleStartup.SetTitle("关闭开机启动")
+		} else {
+			toggleStartup.SetTitle("开启开机启动")
+		}
 	}
 	refresh()
 
@@ -1013,7 +1230,7 @@ func setupTrayMenu(state *trayState) {
 		for range toggleNotify.ClickedCh {
 			settings := state.currentSettings()
 			settings.NotificationEnabled = !settings.NotificationEnabled
-			if err := saveAgentLocalSettings(settings); err == nil {
+			if err := saveAgentLocalSettingsWithStartup(settings); err == nil {
 				state.setSettings(settings)
 			}
 			refresh()
@@ -1027,7 +1244,17 @@ func setupTrayMenu(state *trayState) {
 			} else if agentSettingsLoggedIn(settings) {
 				settings.Mode = "online"
 			}
-			if err := saveAgentLocalSettings(settings); err == nil {
+			if err := saveAgentLocalSettingsWithStartup(settings); err == nil {
+				state.setSettings(settings)
+			}
+			refresh()
+		}
+	}()
+	go func() {
+		for range toggleStartup.ClickedCh {
+			settings := state.currentSettings()
+			settings.StartOnLogin = !settings.StartOnLogin
+			if err := saveAgentLocalSettingsWithStartup(settings); err == nil {
 				state.setSettings(settings)
 			}
 			refresh()
