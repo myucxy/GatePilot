@@ -458,9 +458,7 @@ func runTerminalPassthroughCLI(options runCLIOptions) {
 	options.CLIType = adapter.NormalizeCLIType(options.CLIType)
 	toolType := aiToolTypeForCLI(options.CLIType)
 	if toolType != "" {
-		if err := ensureAIToolConfigured(toolType, options.CommandArgs[0]); err != nil {
-			fmt.Fprintf(os.Stderr, "GatePilot 设置提示: %v\n", err)
-		}
+		_ = ensureAIToolConfigured(toolType, options.CommandArgs[0])
 	}
 	ensureTrayRunning()
 
@@ -478,10 +476,7 @@ func runTerminalPassthroughCLI(options runCLIOptions) {
 		os.Exit(1)
 	}
 	detector.setWriter(command.Input)
-	localHost, err := startLocalSessionHost(localSessionID, command.Input)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "local session control warning: %v\n", err)
-	}
+	localHost, _ := startLocalSessionHost(localSessionID, command.Input)
 	_ = upsertLocalSession(localSessionRecord{
 		SessionID:           localSessionID,
 		CLIType:             options.CLIType,
@@ -497,7 +492,6 @@ func runTerminalPassthroughCLI(options runCLIOptions) {
 	startedAt := time.Now()
 	exitCode, err := command.Wait()
 	if shouldFallbackToPlainTerminal(exitCode, err, startedAt) {
-		fmt.Fprintln(os.Stderr, "GatePilot ConPTY 不可用，已回退到终端直连模式。")
 		exitCode, err = runPlainTerminalPassthrough(options, wd)
 	}
 	if localHost != nil {
