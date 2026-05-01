@@ -50,6 +50,7 @@ New-Item -ItemType Directory -Force -Path $distRoot | Out-Null
 if ($LASTEXITCODE -ne 0) {
     throw "agent build failed"
 }
+Copy-Item -LiteralPath (Join-Path $distRoot "gatepilot-agent.exe") -Destination (Join-Path $distRoot "gp.exe") -Force
 Push-Location (Join-Path $repoRoot "agent\desktop")
 try {
     $env:PATH = "D:\Dev\Env\nvm4w\nodejs;D:\Dev\Env\Go\bin;$env:PATH"
@@ -74,6 +75,25 @@ $readme = @'
 
 桌面客户端会自动启动或连接 `gatepilot-agent.exe tray`。日常配置、登录、离线模式、提醒开关、AI 工具历史来源和会话历史都在桌面客户端里完成，不需要打开网页。
 
+双击 `gatepilot-agent.exe` 会启动托盘 Agent，并打开桌面客户端设置页。托盘菜单里的设置、登录和会话历史也都会打开 `gatepilot-agent-desktop.exe`，不会再弹出浏览器网页。
+
+本地托管 Codex/Claude：
+
+```powershell
+.\gp.exe codex
+.\gp.exe claude
+.\gatepilot-agent.exe codex
+.\gatepilot-agent.exe claude
+.\gatepilot-agent.exe install-gp
+```
+
+运行 `install-gp` 后，新打开的终端可以使用：
+
+```powershell
+gp codex
+gp claude
+```
+
 离线本地确认：
 
 ```powershell
@@ -82,6 +102,8 @@ $readme = @'
 .\gatepilot-agent.exe run --local-only -- fake-ai-cli
 .\gatepilot-agent.exe run --local-only --decision approve -- fake-ai-cli
 .\gatepilot-agent.exe run --local-only --popup -- fake-ai-cli
+.\gatepilot-agent.exe run --local-only --cli-type codex -- codex
+.\gatepilot-agent.exe run --local-only --cli-type claude_code -- claude
 .\gatepilot-agent.exe status
 .\gatepilot-agent.exe settings --notification-enabled true --notification-style mini_window
 .\gatepilot-agent.exe settings --start-on-login true
@@ -94,8 +116,6 @@ $readme = @'
 .\gatepilot-agent.exe offline
 .\gatepilot-agent.exe logout
 ```
-
-双击 `gatepilot-agent.exe` 会启动托盘 Agent，并打开桌面客户端设置页。托盘菜单里的设置、登录和会话历史也都会打开 `gatepilot-agent-desktop.exe`，不会再弹出浏览器网页。
 
 服务端联动模式：
 
@@ -114,6 +134,7 @@ Compress-Archive -Path (Join-Path $distRoot "*") -DestinationPath $packagePath
 
 [pscustomobject]@{
     executable = Join-Path $distRoot "gatepilot-agent.exe"
+    gp = Join-Path $distRoot "gp.exe"
     desktop = Join-Path $distRoot "gatepilot-agent-desktop.exe"
     package = $packagePath
 } | ConvertTo-Json

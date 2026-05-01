@@ -192,6 +192,27 @@ func TestParseRunCLIOptionsSupportsLocalOnly(t *testing.T) {
 	if !options.LocalOnly || !options.Popup || options.Decision != "reject" || options.Payload != "no" || options.CLIType != "codex" || options.CommandLine != "codex" {
 		t.Fatalf("options = %+v, want local-only codex reject", options)
 	}
+	if len(options.CommandArgs) != 1 || options.CommandArgs[0] != "codex" {
+		t.Fatalf("command args = %+v, want codex", options.CommandArgs)
+	}
+}
+
+func TestCommandLineForDisplayQuotesSpacedArgs(t *testing.T) {
+	got := commandLineForDisplay([]string{"codex", "--cd", `E:\Work Space\GatePilot`})
+	if got != `codex --cd "E:\\Work Space\\GatePilot"` {
+		t.Fatalf("command line = %q", got)
+	}
+}
+
+func TestManagedCLICommandUsesRealCommandExceptFake(t *testing.T) {
+	real := managedCLICommand(runCLIOptions{CommandArgs: []string{"codex", "--version"}})
+	if strings.TrimSuffix(filepath.Base(real.Path), filepath.Ext(real.Path)) != "codex" || len(real.Args) != 2 || real.Args[1] != "--version" {
+		t.Fatalf("real command = path %q args %+v", real.Path, real.Args)
+	}
+	fake := managedCLICommand(runCLIOptions{CommandArgs: []string{"fake-ai-cli"}})
+	if len(fake.Args) < 2 || fake.Args[1] != "run-fake" {
+		t.Fatalf("fake command args = %+v, want run-fake", fake.Args)
+	}
 }
 
 func TestLocalDecisionInputUsesPopupDecisionOverride(t *testing.T) {

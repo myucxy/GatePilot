@@ -17,6 +17,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -45,6 +46,7 @@ var configureStartupRegistration = setWindowsStartOnLogin
 type runCLIOptions struct {
 	CLIType     string
 	CommandLine string
+	CommandArgs []string
 	LocalOnly   bool
 	Decision    string
 	Payload     string
@@ -101,6 +103,12 @@ func main() {
 		flushQueue(os.Args[2:])
 	case "run":
 		runManagedCLI(os.Args[2:])
+	case "codex":
+		runAIToolShortcut("codex", os.Args[2:])
+	case "claude":
+		runAIToolShortcut("claude", os.Args[2:])
+	case "install-gp":
+		installGPCommand(os.Args[2:])
 	case "run-fake":
 		runFakeCLI()
 	default:
@@ -115,7 +123,7 @@ func runManagedCLI(args []string) {
 	cliAdapter := adapter.ForCLI(options.CLIType)
 	localSessionID := "local_session_" + fmt.Sprintf("%d", time.Now().UnixNano())
 
-	cmd := exec.Command(os.Args[0], "run-fake")
+	cmd := managedCLICommand(options)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -364,12 +372,163 @@ func parseRunCLIOptions(args []string) runCLIOptions {
 			}
 		case "--":
 			if i+1 < len(args) {
-				options.CommandLine = strings.Join(args[i+1:], " ")
+				options.CommandArgs = append([]string{}, args[i+1:]...)
+				options.CommandLine = commandLineForDisplay(options.CommandArgs)
 			}
 			i = len(args)
 		}
 	}
 	return options
+}
+
+func managedCLICommand(options runCLIOptions) *exec.Cmd {
+	args := options.CommandArgs
+	if len(args) == 0 || isFakeCLICommand(args[0]) {
+		return exec.Command(os.Args[0], "run-fake")
+	}
+	return exec.Command(args[0], args[1:]...)
+}
+
+func isFakeCLICommand(name string) bool {
+	base := strings.ToLower(strings.TrimSuffix(filepath.Base(name), filepath.Ext(name)))
+	switch base {
+	case "", "fake-ai-cli", "gatepilot-fake-ai-cli", "run-fake":
+		return true
+	default:
+		return false
+	}
+}
+
+func commandLineForDisplay(args []string) string {
+	if len(args) == 0 {
+		return "gatepilot fake"
+	}
+	parts := make([]string, 0, len(args))
+	for _, arg := range args {
+		if strings.ContainsAny(arg, " \t\"") {
+			parts = append(parts, strconv.Quote(arg))
+		} else {
+			parts = append(parts, arg)
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
+func runAIToolShortcut(toolType string, args []string) {
+	executable := toolType
+	cliType := toolType
+	if toolType == "claude" {
+		cliType = "claude_code"
+	}
+	settings, err := loadAgentLocalSettings()
+	if err == nil {
+		for _, cfg := range configuredAITools(settings) {
+			if cfg.ToolType == toolType && strings.TrimSpace(cfg.ExecutablePath) != "" {
+				executable = cfg.ExecutablePath
+				break
+			}
+		}
+	}
+	runArgs := []string{"--local-only", "--cli-type", cliType, "--", executable}
+	runArgs = append(runArgs, args...)
+	runManagedCLI(runArgs)
+}
+
+func installGPCommand(args []string) {
+	target := ""
+	binDir := ""
+	noPath := false
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--target":
+			if i+1 < len(args) {
+				target = args[i+1]
+				i++
+			}
+		case "--bin-dir":
+			if i+1 < len(args) {
+				binDir = args[i+1]
+				i++
+			}
+		case "--no-path":
+			noPath = true
+		}
+	}
+	if target == "" {
+		exe, err := os.Executable()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		target = exe
+	}
+	if binDir == "" {
+		localAppData := getenv("LOCALAPPDATA", "")
+		if localAppData == "" {
+			home, _ := os.UserHomeDir()
+			localAppData = filepath.Join(home, ".gatepilot")
+		}
+		binDir = filepath.Join(localAppData, "GatePilot", "bin")
+	}
+	if err := os.MkdirAll(binDir, 0700); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	shimPath := filepath.Join(binDir, "gp.cmd")
+	shim := "@echo off\r\n\"" + target + "\" %*\r\n"
+	if err := os.WriteFile(shimPath, []byte(shim), 0600); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	pathUpdated := false
+	if runtime.GOOS == "windows" && !noPath {
+		if err := addUserPathDirectory(binDir); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: add PATH failed: %v\n", err)
+		} else {
+			pathUpdated = true
+		}
+	}
+	fmt.Println(mustJSON(map[string]any{
+		"type":         "gp.installed",
+		"shim":         shimPath,
+		"target":       target,
+		"path_updated": pathUpdated,
+		"usage":        "gp codex 或 gp claude",
+	}))
+}
+
+func addUserPathDirectory(dir string) error {
+	if runtime.GOOS != "windows" {
+		return nil
+	}
+	script := `$ErrorActionPreference = "Stop"
+$dir = $env:GATEPILOT_GP_BIN
+$old = [Environment]::GetEnvironmentVariable("Path", "User")
+if ([string]::IsNullOrWhiteSpace($old)) {
+  $new = $dir
+} else {
+  $items = $old -split ';' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+  $exists = $false
+  foreach ($item in $items) {
+    if ([string]::Equals($item.TrimEnd([char]'\'), $dir.TrimEnd([char]'\'), [System.StringComparison]::OrdinalIgnoreCase)) {
+      $exists = $true
+      break
+    }
+  }
+  if ($exists) {
+    $new = $old
+  } else {
+    $new = ($items + $dir) -join ';'
+  }
+}
+[Environment]::SetEnvironmentVariable("Path", $new, "User")`
+	cmd := exec.Command("powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script)
+	cmd.Env = append(os.Environ(), "GATEPILOT_GP_BIN="+dir)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%v: %s", err, strings.TrimSpace(string(output)))
+	}
+	return nil
 }
 
 type agentLocalSettings struct {
