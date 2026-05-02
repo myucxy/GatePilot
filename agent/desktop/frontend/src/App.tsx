@@ -908,15 +908,29 @@ type TerminalLine = {
 };
 
 function buildTerminalLines(detail: Detail): TerminalLine[] {
-  const output = normalizeRecords(detail.output).map((record, index) => {
+  const output: TerminalLine[] = [];
+  const sortedOutput = normalizeRecords(detail.output).slice().sort((left, right) => {
+    const leftSequence = numberValue(left.sequence_no);
+    const rightSequence = numberValue(right.sequence_no);
+    return leftSequence - rightSequence;
+  });
+  for (const [index, record] of sortedOutput.entries()) {
     const stream = String(record.stream_type || 'stdout').toLowerCase();
-    return {
-      kind: stream === 'stderr' ? 'stderr' as const : 'stdout' as const,
+    const kind = stream === 'stderr' ? 'stderr' as const : 'stdout' as const;
+    const text = terminalText(record, ['content', 'content_redacted']);
+    if (!text) continue;
+    const previous = output[output.length - 1];
+    if (previous && previous.kind === kind) {
+      previous.text += text;
+      continue;
+    }
+    output.push({
+      kind,
       label: stream === 'stderr' ? 'err' : 'out',
       sequence: numberValue(record.sequence_no) || index + 1,
-      text: terminalText(record, ['content_redacted', 'content']),
-    };
-  });
+      text,
+    });
+  }
   const approvals = normalizeRecords(detail.approvals).map((record, index) => ({
     kind: 'approval' as const,
     label: '确认',
