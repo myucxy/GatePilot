@@ -1,5 +1,4 @@
-import React, {useEffect, useMemo, useState} from 'react';
-import './App.css';
+import {useEffect, useMemo, useState} from 'react';
 import {
   ContinueAIToolSession,
   DeleteAIToolSession,
@@ -96,10 +95,6 @@ type AIToolDetail = {
   messages: Record<string, unknown>[];
 };
 
-type ErrorBoundaryState = {
-  error: Error | null;
-};
-
 const emptySettings: Settings = {
   mode: 'offline',
   start_on_login: false,
@@ -148,7 +143,7 @@ function App() {
   const enabledTools = useMemo(() => (settings.ai_tools || []).filter((tool) => tool.enabled && tool.tool_id), [settings.ai_tools]);
   const runningCount = sessions.filter((item) => item.status === 'running' || item.status === 'waiting_approval').length;
   const pendingCount = sessions.reduce((sum, item) => sum + (item.pending_approval_count || 0), 0);
-  const canReply = detail?.session.status === 'running' || detail?.session.status === 'waiting_approval';
+  const canReply = detail?.session?.status === 'running' || detail?.session?.status === 'waiting_approval';
 
   useEffect(() => {
     boot();
@@ -425,8 +420,7 @@ function App() {
   }
 
   return (
-    <AppErrorBoundary>
-      <div className="app-shell">
+    <div className="app-shell">
       <aside className="sidebar">
         <div className="brand">
           <div className="mark">GP</div>
@@ -504,33 +498,8 @@ function App() {
           />
         )}
       </main>
-      </div>
-    </AppErrorBoundary>
+    </div>
   );
-}
-
-class AppErrorBoundary extends React.Component<{children: React.ReactNode}, ErrorBoundaryState> {
-  state: ErrorBoundaryState = {error: null};
-
-  static getDerivedStateFromError(error: Error): ErrorBoundaryState {
-    return {error};
-  }
-
-  render() {
-    if (this.state.error) {
-      return (
-        <div className="fatal-shell">
-          <section className="fatal-card">
-            <h1>页面渲染失败</h1>
-            <p>客户端捕获到异常，窗口不会再停留在空白蓝色背景。请点击下面按钮恢复界面。</p>
-            <pre>{this.state.error.message || String(this.state.error)}</pre>
-            <button className="primary" onClick={() => this.setState({error: null})}>恢复界面</button>
-          </section>
-        </div>
-      );
-    }
-    return this.props.children;
-  }
 }
 
 function ProcessView(props: {
@@ -585,7 +554,7 @@ function ProcessView(props: {
       </section>
 
       <section className="panel detail-panel">
-        {props.detail ? (
+        {props.detail?.session?.session_id ? (
           <ProcessDetail
             detail={props.detail}
             canReply={props.canReply}
@@ -608,7 +577,7 @@ function ProcessDetail(props: {
   setReplyText: (value: string) => void;
   sendReply: () => void;
 }) {
-  const {session} = props.detail;
+  const session = props.detail.session || normalizeSession(null);
   return (
     <>
       <div className="detail-title">

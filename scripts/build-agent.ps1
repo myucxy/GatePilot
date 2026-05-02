@@ -3,6 +3,8 @@ $ErrorActionPreference = "Stop"
 $repoRoot = Resolve-Path "$PSScriptRoot\.."
 $distRoot = Join-Path $repoRoot "dist\gatepilot-client-windows-amd64"
 $packagePath = Join-Path $repoRoot "dist\gatepilot-client-windows-amd64.zip"
+$legacyDistRoot = Join-Path $repoRoot "dist\gatepilot-agent-windows-amd64"
+$legacyPackagePath = Join-Path $repoRoot "dist\gatepilot-agent-windows-amd64.zip"
 $clientExeName = "GataPilot" + [string][char]0x5BA2 + [string][char]0x6237 + [string][char]0x7AEF + ".exe"
 
 function Resolve-Go {
@@ -43,6 +45,19 @@ function Resolve-Wails {
 
 $go = Resolve-Go
 $wails = Resolve-Wails
+
+if (Test-Path $legacyDistRoot) {
+    Remove-Item -LiteralPath (Join-Path $legacyDistRoot "*") -Recurse -Force -ErrorAction SilentlyContinue
+    try {
+        Remove-Item -LiteralPath $legacyDistRoot -Recurse -Force -ErrorAction Stop
+    }
+    catch {
+        Write-Warning "Legacy dist directory is locked by another process or terminal: $legacyDistRoot"
+    }
+}
+if (Test-Path $legacyPackagePath) {
+    Remove-Item -LiteralPath $legacyPackagePath -Force
+}
 if (Test-Path $distRoot) {
     Remove-Item -Path (Join-Path $distRoot "*") -Recurse -Force
 }
