@@ -299,7 +299,10 @@ input[type='checkbox'] {
 }
 
 .detail-panel {
-  padding-bottom: 14px;
+  display: flex;
+  min-height: calc(100vh - 92px);
+  padding-bottom: 0;
+  flex-direction: column;
 }
 
 .status-pill {
@@ -389,6 +392,132 @@ input[type='checkbox'] {
 
 .reply-bar input {
   flex: 1;
+}
+
+.process-command-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 10px 14px;
+  border-bottom: 1px solid #eef1f4;
+  color: #57606a;
+  font-size: 12px;
+}
+
+.process-command-meta span {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.terminal-shell {
+  display: grid;
+  grid-template-rows: auto minmax(360px, 1fr) auto;
+  min-height: 0;
+  flex: 1;
+  background: #0d1117;
+  color: #c9d1d9;
+}
+
+.terminal-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 38px;
+  padding: 0 12px;
+  border-bottom: 1px solid #30363d;
+  background: #161b22;
+  color: #8b949e;
+  font-size: 12px;
+}
+
+.terminal-toolbar code {
+  color: #8b949e;
+}
+
+.terminal-output {
+  min-height: 0;
+  overflow: auto;
+  padding: 12px;
+  font-family: Consolas, "Cascadia Mono", monospace;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.terminal-line {
+  display: grid;
+  grid-template-columns: 46px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  padding: 1px 0;
+}
+
+.terminal-line pre {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.terminal-prefix {
+  color: #6e7681;
+  text-align: right;
+  user-select: none;
+}
+
+.terminal-line.stderr {
+  color: #ff7b72;
+}
+
+.terminal-line.approval {
+  color: #f2cc60;
+}
+
+.terminal-line.decision {
+  color: #7ee787;
+}
+
+.terminal-line.system {
+  color: #79c0ff;
+}
+
+.terminal-empty {
+  padding: 16px 0;
+  color: #6e7681;
+}
+
+.terminal-input-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  padding: 10px 12px;
+  border-top: 1px solid #30363d;
+  background: #161b22;
+  color: #7ee787;
+  font-family: Consolas, "Cascadia Mono", monospace;
+}
+
+.terminal-input-row input {
+  height: 32px;
+  border-color: #30363d;
+  background: #0d1117;
+  color: #c9d1d9;
+  font-family: inherit;
+}
+
+.terminal-input-row input:disabled {
+  color: #6e7681;
+}
+
+.terminal-input-row button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 
 .kv {

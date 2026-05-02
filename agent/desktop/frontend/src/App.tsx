@@ -1,4 +1,4 @@
-import {useEffect, useMemo, useState} from 'react';
+import {FormEvent, useEffect, useMemo, useRef, useState} from 'react';
 import {
   ContinueAIToolSession,
   DeleteAIToolSession,
@@ -584,30 +584,81 @@ function ProcessDetail(props: {
         <h2>{session.command_line_redacted || session.session_id}</h2>
         <span className={`status-pill ${session.status}`}>{statusLabel(session.status)}</span>
       </div>
-      <div className="summary-grid">
-        <InfoCard label="会话 ID" value={session.session_id} />
-        <InfoCard label="CLI" value={session.cli_type} />
-        <InfoCard label="工作目录" value={session.working_dir || '-'} wide />
-        <InfoCard label="命令" value={session.command_line_redacted || '-'} wide />
-        <InfoCard label="开始时间" value={formatDate(session.started_at)} />
-        <InfoCard label="结束时间" value={formatDate(session.ended_at || '')} />
-        <InfoCard label="控制端口" value={session.control_addr || '-'} />
-        <InfoCard label="待确认" value={String(session.pending_approval_count || 0)} />
+      <div className="process-command-meta">
+        <span>{session.cli_type || 'custom'}</span>
+        <span>{formatDate(session.started_at)}</span>
+        <span>{session.working_dir || '-'}</span>
       </div>
-      <section className="panel-section">
-        <h3>当前摘要</h3>
-        <p>{session.last_output_summary || '暂无摘要'}</p>
-      </section>
-      {props.canReply && (
-        <section className="reply-bar">
-          <input value={props.replyText} onChange={(e) => props.setReplyText(e.target.value)} placeholder="发送到该 GP 子进程的输入" />
-          <button className="primary" onClick={props.sendReply}>发送</button>
-        </section>
-      )}
-      <ReadableOutput title="输出内容" records={props.detail.output} />
-      <ApprovalList title="审批请求" records={props.detail.approvals} />
-      <DecisionList title="已写回决策" records={props.detail.decisions} />
+      <TerminalPanel
+        detail={props.detail}
+        canReply={props.canReply}
+        replyText={props.replyText}
+        setReplyText={props.setReplyText}
+        sendReply={props.sendReply}
+      />
     </>
+  );
+}
+
+function TerminalPanel(props: {
+  detail: Detail;
+  canReply: boolean;
+  replyText: string;
+  setReplyText: (value: string) => void;
+  sendReply: () => void;
+}) {
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const session = props.detail.session || normalizeSession(null);
+  const lines = useMemo(() => buildTerminalLines(props.detail), [props.detail]);
+
+  useEffect(() => {
+    const node = scrollRef.current;
+    if (node) node.scrollTop = node.scrollHeight;
+  }, [lines.length, props.detail.output.length, props.detail.approvals.length, props.detail.decisions.length]);
+
+  function submit(event: FormEvent) {
+    event.preventDefault();
+    if (!props.canReply || !props.replyText.trim()) return;
+    props.sendReply();
+  }
+
+  return (
+    <section className="terminal-shell">
+      <div className="terminal-toolbar">
+        <span>实时输出</span>
+        <code>{session.session_id}</code>
+      </div>
+      <div className="terminal-output" ref={scrollRef}>
+        <div className="terminal-line system">
+          <span className="terminal-prefix">$</span>
+          <pre>{session.command_line_redacted || session.cli_type || 'gp'}</pre>
+        </div>
+        {session.working_dir && (
+          <div className="terminal-line system">
+            <span className="terminal-prefix">dir</span>
+            <pre>{session.working_dir}</pre>
+          </div>
+        )}
+        {lines.length === 0 ? (
+          <div className="terminal-empty">暂无输出，新的内容会实时显示在这里。</div>
+        ) : lines.map((line, index) => (
+          <div className={`terminal-line ${line.kind}`} key={`${line.kind}-${line.sequence}-${index}`}>
+            <span className="terminal-prefix">{line.label}</span>
+            <pre>{line.text}</pre>
+          </div>
+        ))}
+      </div>
+      <form className="terminal-input-row" onSubmit={submit}>
+        <span>&gt;</span>
+        <input
+          value={props.replyText}
+          disabled={!props.canReply}
+          onChange={(event) => props.setReplyText(event.target.value)}
+          placeholder={props.canReply ? '在这里输入并回车发送到当前 GP 子进程' : '当前进程不可输入'}
+        />
+        <button className="primary" disabled={!props.canReply || !props.replyText.trim()} type="submit">发送</button>
+      </form>
+    </section>
   );
 }
 
@@ -847,6 +898,50 @@ function normalizeDetail(value: unknown): Detail {
 function normalizeRecords(value: unknown): Record<string, unknown>[] {
   if (!Array.isArray(value)) return [];
   return value.map((item) => (isRecord(item) ? item : {content: String(item)}));
+}
+
+type TerminalLine = {
+  kind: 'stdout' | 'stderr' | 'approval' | 'decision';
+  label: string;
+  sequence: number;
+  text: string;
+};
+
+function buildTerminalLines(detail: Detail): TerminalLine[] {
+  const output = normalizeRecords(detail.output).map((record, index) => {
+    const stream = String(record.stream_type || 'stdout').toLowerCase();
+    return {
+      kind: stream === 'stderr' ? 'stderr' as const : 'stdout' as const,
+      label: stream === 'stderr' ? 'err' : 'out',
+      sequence: numberValue(record.sequence_no) || index + 1,
+      text: terminalText(record, ['content_redacted', 'content']),
+    };
+  });
+  const approvals = normalizeRecords(detail.approvals).map((record, index) => ({
+    kind: 'approval' as const,
+    label: '确认',
+    sequence: 100000 + index,
+    text: terminalText(record, ['prompt_text', 'context_before', 'event_type']),
+  }));
+  const decisions = normalizeRecords(detail.decisions).map((record, index) => ({
+    kind: 'decision' as const,
+    label: '决策',
+    sequence: 200000 + index,
+    text: terminalText(record, ['payload_redacted', 'decision_type', 'result']) || `写入字节数：${String(record.bytes_written || 0)}`,
+  }));
+  return [...output, ...approvals, ...decisions]
+    .filter((line) => line.text.trim())
+    .sort((left, right) => left.sequence - right.sequence);
+}
+
+function terminalText(record: Record<string, unknown>, keys: string[]): string {
+  for (const key of keys) {
+    const value = record[key];
+    if (value !== undefined && value !== null && String(value) !== '') {
+      return String(value);
+    }
+  }
+  return JSON.stringify(record, null, 2);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
