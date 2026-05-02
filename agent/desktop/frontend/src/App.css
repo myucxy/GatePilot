@@ -1,3 +1,32 @@
+.fatal-shell {
+  display: grid;
+  min-height: 100vh;
+  place-items: center;
+  padding: 24px;
+  background: #f6f8fa;
+  color: #1f2328;
+}
+
+.fatal-card {
+  display: grid;
+  gap: 12px;
+  width: min(560px, 100%);
+  padding: 18px;
+  border: 1px solid #d8dee4;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.fatal-card h1 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.fatal-card p {
+  margin: 0;
+  color: #57606a;
+}
+
 .app-shell {
   display: grid;
   grid-template-columns: 260px 1fr;

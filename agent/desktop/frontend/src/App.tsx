@@ -1,4 +1,4 @@
-import {useEffect, useMemo, useState} from 'react';
+import React, {useEffect, useMemo, useState} from 'react';
 import './App.css';
 import {
   ContinueAIToolSession,
@@ -94,6 +94,10 @@ type AIToolSession = {
 type AIToolDetail = {
   session: AIToolSession;
   messages: Record<string, unknown>[];
+};
+
+type ErrorBoundaryState = {
+  error: Error | null;
 };
 
 const emptySettings: Settings = {
@@ -213,7 +217,7 @@ function App() {
   async function loadSessions() {
     try {
       const result = await ListSessions(cliFilter, statusFilter, 200);
-      setSessions(result.items || []);
+      setSessions(normalizeSessions(result.items));
     } catch (err) {
       showError(err);
     }
@@ -230,6 +234,7 @@ function App() {
 
   async function selectSession(id: string) {
     setSelectedSession(id);
+    setDetail(null);
     setReplyText('');
     try {
       setDetail(normalizeDetail(await GetSessionDetail(id)));
@@ -383,10 +388,10 @@ function App() {
     const type = event.type || '';
     const data = event.data || {};
     if (type === 'session_started' || type === 'session_updated') {
-      const session = data as unknown as Session;
+      const session = normalizeSession(data);
       if (session.session_id) {
         setSessions((current) => upsertSession(current, session));
-        setDetail((current) => current && current.session.session_id === session.session_id
+        setDetail((current) => current && current.session?.session_id === session.session_id
           ? {...current, session: {...current.session, ...session}}
           : current);
       }
@@ -400,7 +405,7 @@ function App() {
         : item));
       if (sessionID === selectedSession) {
         setDetail((current) => current
-          ? {...current, output: appendRecord(current.output || [], data)}
+          ? normalizeDetail({...current, output: appendRecord(current.output || [], data)})
           : current);
       }
       return;
@@ -412,15 +417,16 @@ function App() {
       if (sessionID && sessionID === selectedSession) {
         setDetail((current) => {
           if (!current) return current;
-          if (type === 'approval') return {...current, approvals: appendRecord(current.approvals || [], raw)};
-          return {...current, decisions: appendRecord(current.decisions || [], data)};
+          if (type === 'approval') return normalizeDetail({...current, approvals: appendRecord(current.approvals || [], raw)});
+          return normalizeDetail({...current, decisions: appendRecord(current.decisions || [], data)});
         });
       }
     }
   }
 
   return (
-    <div className="app-shell">
+    <AppErrorBoundary>
+      <div className="app-shell">
       <aside className="sidebar">
         <div className="brand">
           <div className="mark">GP</div>
@@ -498,8 +504,33 @@ function App() {
           />
         )}
       </main>
-    </div>
+      </div>
+    </AppErrorBoundary>
   );
+}
+
+class AppErrorBoundary extends React.Component<{children: React.ReactNode}, ErrorBoundaryState> {
+  state: ErrorBoundaryState = {error: null};
+
+  static getDerivedStateFromError(error: Error): ErrorBoundaryState {
+    return {error};
+  }
+
+  render() {
+    if (this.state.error) {
+      return (
+        <div className="fatal-shell">
+          <section className="fatal-card">
+            <h1>页面渲染失败</h1>
+            <p>客户端捕获到异常，窗口不会再停留在空白蓝色背景。请点击下面按钮恢复界面。</p>
+            <pre>{this.state.error.message || String(this.state.error)}</pre>
+            <button className="primary" onClick={() => this.setState({error: null})}>恢复界面</button>
+          </section>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
 }
 
 function ProcessView(props: {
@@ -793,6 +824,27 @@ function InfoCard({label, value, wide}: {label: string; value: string; wide?: bo
   );
 }
 
+function normalizeSessions(value: unknown): Session[] {
+  if (!Array.isArray(value)) return [];
+  return value.map((item) => normalizeSession(item)).filter((item) => item.session_id);
+}
+
+function normalizeSession(value: unknown): Session {
+  const item = isRecord(value) ? value : {};
+  return {
+    session_id: stringValue(item.session_id),
+    cli_type: stringValue(item.cli_type || 'custom'),
+    command_line_redacted: stringValue(item.command_line_redacted),
+    working_dir: stringValue(item.working_dir),
+    status: stringValue(item.status || 'unknown'),
+    started_at: stringValue(item.started_at),
+    ended_at: stringValue(item.ended_at),
+    last_output_summary: stringValue(item.last_output_summary),
+    pending_approval_count: numberValue(item.pending_approval_count),
+    control_addr: stringValue(item.control_addr),
+  };
+}
+
 function upsertSession(items: Session[], session: Session) {
   const next = [...items];
   const index = next.findIndex((item) => item.session_id === session.session_id);
@@ -805,20 +857,41 @@ function upsertSession(items: Session[], session: Session) {
 }
 
 function appendRecord(items: Record<string, unknown>[], record: Record<string, unknown>) {
+  const safeItems = Array.isArray(items) ? items : [];
   const sequence = record.sequence_no;
-  if (sequence !== undefined && items.some((item) => item.sequence_no === sequence && item.session_id === record.session_id)) {
-    return items;
+  if (sequence !== undefined && safeItems.some((item) => item.sequence_no === sequence && item.session_id === record.session_id)) {
+    return safeItems;
   }
-  return [...items, record].slice(-500);
+  return [...safeItems, record].slice(-500);
 }
 
-function normalizeDetail(value: Detail): Detail {
+function normalizeDetail(value: unknown): Detail {
+  const detail = isRecord(value) ? value : {};
   return {
-    ...value,
-    output: Array.isArray(value.output) ? value.output : [],
-    approvals: Array.isArray(value.approvals) ? value.approvals : [],
-    decisions: Array.isArray(value.decisions) ? value.decisions : [],
+    session: normalizeSession(detail.session),
+    output: normalizeRecords(detail.output),
+    approvals: normalizeRecords(detail.approvals),
+    decisions: normalizeRecords(detail.decisions),
   };
+}
+
+function normalizeRecords(value: unknown): Record<string, unknown>[] {
+  if (!Array.isArray(value)) return [];
+  return value.map((item) => (isRecord(item) ? item : {content: String(item)}));
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
+function stringValue(value: unknown): string {
+  if (value === undefined || value === null) return '';
+  return String(value);
+}
+
+function numberValue(value: unknown): number {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : 0;
 }
 
 function ReadableOutput({title, records}: {title: string; records: Record<string, unknown>[]}) {
