@@ -232,7 +232,7 @@ function App() {
     setSelectedSession(id);
     setReplyText('');
     try {
-      setDetail(await GetSessionDetail(id));
+      setDetail(normalizeDetail(await GetSessionDetail(id)));
     } catch (err) {
       showError(err);
     }
@@ -812,11 +812,21 @@ function appendRecord(items: Record<string, unknown>[], record: Record<string, u
   return [...items, record].slice(-500);
 }
 
+function normalizeDetail(value: Detail): Detail {
+  return {
+    ...value,
+    output: Array.isArray(value.output) ? value.output : [],
+    approvals: Array.isArray(value.approvals) ? value.approvals : [],
+    decisions: Array.isArray(value.decisions) ? value.decisions : [],
+  };
+}
+
 function ReadableOutput({title, records}: {title: string; records: Record<string, unknown>[]}) {
+  const safeRecords = Array.isArray(records) ? records : [];
   return (
     <div className="record-block">
       <h3>{title}</h3>
-      {records.length === 0 ? <p>暂无输出记录。</p> : records.map((record, index) => (
+      {safeRecords.length === 0 ? <p>暂无输出记录。</p> : safeRecords.map((record, index) => (
         <article className="record-card" key={index}>
           <header>
             <span>{String(record.stream_type || 'stdout')} #{String(record.sequence_no || index + 1)}</span>
@@ -830,10 +840,11 @@ function ReadableOutput({title, records}: {title: string; records: Record<string
 }
 
 function ReadableMessages({title, records}: {title: string; records: Record<string, unknown>[]}) {
+  const safeRecords = Array.isArray(records) ? records : [];
   return (
     <div className="record-block">
       <h3>{title}</h3>
-      {records.length === 0 ? <p>暂无消息。</p> : records.map((record, index) => (
+      {safeRecords.length === 0 ? <p>暂无消息。</p> : safeRecords.map((record, index) => (
         <article className="record-card" key={index}>
           <header>
             <span>{String(record.role || record.type || 'message')}</span>
@@ -847,10 +858,11 @@ function ReadableMessages({title, records}: {title: string; records: Record<stri
 }
 
 function ApprovalList({title, records}: {title: string; records: Record<string, unknown>[]}) {
+  const safeRecords = Array.isArray(records) ? records : [];
   return (
     <div className="record-block">
       <h3>{title}</h3>
-      {records.length === 0 ? <p>暂无审批请求。</p> : records.map((record, index) => (
+      {safeRecords.length === 0 ? <p>暂无审批请求。</p> : safeRecords.map((record, index) => (
         <article className="record-card" key={index}>
           <header>
             <span>{String(record.event_type || 'approval')} · {String(record.status || '-')}</span>
@@ -864,10 +876,11 @@ function ApprovalList({title, records}: {title: string; records: Record<string, 
 }
 
 function DecisionList({title, records}: {title: string; records: Record<string, unknown>[]}) {
+  const safeRecords = Array.isArray(records) ? records : [];
   return (
     <div className="record-block">
       <h3>{title}</h3>
-      {records.length === 0 ? <p>暂无写回决策。</p> : records.map((record, index) => (
+      {safeRecords.length === 0 ? <p>暂无写回决策。</p> : safeRecords.map((record, index) => (
         <article className="record-card" key={index}>
           <header>
             <span>{String(record.decision_type || '-')} · {String(record.result || '-')}</span>

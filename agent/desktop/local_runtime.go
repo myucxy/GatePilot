@@ -818,7 +818,12 @@ func localSessionDetail(sessionID string) (SessionDetail, bool, error) {
 		if session.SessionID != sessionID {
 			continue
 		}
-		detail := SessionDetail{Session: session}
+		detail := SessionDetail{
+			Session:   session,
+			Output:    []map[string]any{},
+			Approvals: []map[string]any{},
+			Decisions: []map[string]any{},
+		}
 		for _, item := range history.Output {
 			if item.SessionID == sessionID {
 				detail.Output = append(detail.Output, structToMap(item))
