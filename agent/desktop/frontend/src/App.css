@@ -449,7 +449,19 @@ input[type='checkbox'] {
   grid-template-columns: 46px minmax(0, 1fr);
   gap: 10px;
   align-items: start;
-  padding: 1px 0;
+  min-height: 18px;
+  padding: 0;
+}
+
+.terminal-line.stdout,
+.terminal-line.stderr {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0;
+}
+
+.terminal-line.stdout .terminal-prefix,
+.terminal-line.stderr .terminal-prefix {
+  display: none;
 }
 
 .terminal-line pre {

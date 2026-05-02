@@ -914,23 +914,52 @@ function buildTerminalLines(detail: Detail): TerminalLine[] {
     const rightSequence = numberValue(right.sequence_no);
     return leftSequence - rightSequence;
   });
+  let pendingKind: TerminalLine['kind'] | '' = '';
+  let pendingText = '';
+  let pendingSequence = 0;
+  let pendingDirty = false;
+
+  function flushPending(force = false) {
+    if (!force && !pendingDirty) return;
+    output.push({
+      kind: pendingKind === 'stderr' ? 'stderr' : 'stdout',
+      label: '',
+      sequence: pendingSequence || output.length + 1,
+      text: pendingText,
+    });
+    pendingText = '';
+    pendingDirty = false;
+  }
+
+  function appendOutput(kind: 'stdout' | 'stderr', sequence: number, text: string) {
+    if (pendingKind && pendingKind !== kind) {
+      flushPending();
+    }
+    if (!pendingKind) {
+      pendingKind = kind;
+      pendingSequence = sequence;
+    }
+    for (const char of text.replace(/\r\n/g, '\n').replace(/\r/g, '\n')) {
+      if (char === '\n') {
+        flushPending(true);
+        pendingKind = kind;
+        pendingSequence = sequence;
+      } else {
+        pendingText += char;
+        pendingDirty = true;
+      }
+    }
+  }
+
   for (const [index, record] of sortedOutput.entries()) {
     const stream = String(record.stream_type || 'stdout').toLowerCase();
     const kind = stream === 'stderr' ? 'stderr' as const : 'stdout' as const;
     const text = terminalText(record, ['content', 'content_redacted']);
     if (!text) continue;
-    const previous = output[output.length - 1];
-    if (previous && previous.kind === kind) {
-      previous.text += text;
-      continue;
-    }
-    output.push({
-      kind,
-      label: stream === 'stderr' ? 'err' : 'out',
-      sequence: numberValue(record.sequence_no) || index + 1,
-      text,
-    });
+    appendOutput(kind, numberValue(record.sequence_no) || index + 1, text);
   }
+  flushPending();
+
   const approvals = normalizeRecords(detail.approvals).map((record, index) => ({
     kind: 'approval' as const,
     label: '确认',
@@ -944,7 +973,7 @@ function buildTerminalLines(detail: Detail): TerminalLine[] {
     text: terminalText(record, ['payload_redacted', 'decision_type', 'result']) || `写入字节数：${String(record.bytes_written || 0)}`,
   }));
   return [...output, ...approvals, ...decisions]
-    .filter((line) => line.text.trim())
+    .filter((line) => line.kind === 'stdout' || line.kind === 'stderr' || line.text.trim())
     .sort((left, right) => left.sequence - right.sequence);
 }
 
